@@ -4,7 +4,7 @@
 const LKEY='xfinance_v2';
 let db={clients:[],contracts:[],debts:[],investors:[]};
 const SDEF={inst:true,debt:true,sign:'',green:{},lastBackup:null};
-let linked=new Set(),NI={unread:0,shared:0,notes:null},shared=null,itab='notes';
+let linked=new Set(),NI={unread:0,shared:0,notes:null},shared=null,itab='notes',PROPS=[];
 let S={...SDEF},me=null,info={},LOCAL=false,offline=false,pub=null,pubData=null,inv=null,mem=false;
 
 /* ---------- помощники ---------- */
@@ -66,6 +66,9 @@ card:sv('<rect x="3" y="5.500" width="18" height="13" rx="3"/><path d="M3 10h18M
 rub:sv('<path d="M8 20V5h5a4 4 0 0 1 0 8H6M6 16.500h8"/>',2),
 cash:sv('<rect x="3" y="6" width="18" height="12" rx="2.500"/><circle cx="12" cy="12" r="2.600"/><path d="M6.500 9.500v.010M17.500 14.500v.010"/>'),
 trend:sv('<path d="M4 17l5.500-5.500 3.500 3.500L20 8M15 8h5v5"/>'),
+sync:sv('<path d="M20 11a8 8 0 0 0-14.6-4.5L4 8"/><path d="M4 3.5V8h4.5"/><path d="M4 13a8 8 0 0 0 14.6 4.5L20 16"/><path d="M20 20.5V16h-4.5"/>',2),
+upl:sv('<path d="M12 19V6"/><path d="m6 11 6-6 6 6"/>',2.2),
+cloud:sv('<path d="M7 18a4.5 4.5 0 0 1-.6-8.96A6 6 0 0 1 18 8.5a4.75 4.75 0 0 1-.5 9.5z"/><path d="m9.5 13.5 2 2 3.5-4"/>'),
 file:sv('<path d="M7 3h7l5 5v12a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z"/><path d="M14 3v5h5"/>')
 };
 
@@ -73,13 +76,24 @@ file:sv('<path d="M7 3h7l5 5v12a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z"/
 async function api(method,url,body,rawType){
   const o={method,credentials:'same-origin',headers:{}};
   if(rawType){o.headers['Content-Type']=rawType;o.body=body}else if(body){o.headers['Content-Type']='application/json';o.body=JSON.stringify(body)}
-  let r;try{r=await fetch(url,o)}catch(e){throw new Error('Нет связи с сервером')}
+  let r;try{r=await fetch(url,o)}catch(e){const x=new Error('Нет связи с сервером');x.net=true;throw x}
   const j=await r.json().catch(()=>null);
+  if(!j&&r.status>=500){const x=new Error('Сервер недоступен ('+r.status+')');x.net=true;throw x}
   if(!r.ok||!j){if(r.status===401&&me&&!url.includes('/login')){me=null;render()}throw new Error(j&&j.error||'Ошибка сервера ('+r.status+')')}
   return j;
 }
 const KIND={client:'clients',contract:'contracts',debt:'debts',investor:'investors'};
-function saveLocal(){try{localStorage.setItem(LKEY,JSON.stringify({db,S}))}catch(e){mem=true}}
+function saveLocal(){try{localStorage.setItem(LKEY,JSON.stringify({db,S}))}catch(e){mem=true}kvs('put','local',{db,S,at:new Date().toISOString()}).catch(()=>{})}
+/* копия данных аккаунта на устройстве (IndexedDB): без связи приложение открывается с ней, изменения уходят из очереди */
+let snapT=0,stale=null;
+function snapSoon(){if(LOCAL||!me||me.role!=='owner')return;clearTimeout(snapT);snapT=setTimeout(snapNow,700)}
+async function snapNow(){if(!me||me.role!=='owner')return;try{await kvs('put','snap:'+me.id,{me,db,S,props:PROPS,at:new Date().toISOString()});localStorage.setItem('xf_last_uid',me.id)}catch(e){}}
+async function snapLoad(){try{const id=localStorage.getItem('xf_last_uid');return id?await kvs('get','snap:'+id):null}catch(e){return null}}
+function useSnap(sn){me=sn.me;db=normalize(sn.db);S={...SDEF,...sn.S};PROPS=sn.props||[];stale=sn.at||new Date().toISOString();obLoad();obApply()}
+async function reconnect(){if(!stale)return;try{const r=await fetch('/api/me',{credentials:'same-origin'});if(!r.ok)return;const j=await r.json();if(!('user' in j))return;info=j;
+  if(!j.user){stale=null;me=null;render();return}me=j.user;stale=null;offline=false;await obFlush(true);await loadData();render();toast('Связь восстановлена — данные синхронизированы')}catch(e){}}
+setInterval(()=>{if(stale&&!document.hidden)reconnect()},15000);addEventListener('online',()=>reconnect());
+const staleBar=()=>stale?`<div class="stale">${I.cloud}<span><b>Нет связи с сервером</b> · работаете с копией на устройстве от ${new Date(stale).toLocaleString('ru-RU',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'})}. Изменения сохранятся и отправятся сами.</span><button class="btn sm soft" data-a="reconnect">Проверить</button></div>`:'';
 function normalize(d){
   DV++;  d.investors=d.investors||[];d.clients=d.clients||[];d.contracts=d.contracts||[];d.debts=d.debts||[];
   d.clients.forEach(c=>{if(c.name&&!c.first&&!c.last)c.first=c.name;delete c.name;c.files=c.files||[]});
@@ -98,20 +112,86 @@ function loadLocal(){
 }
 async function loadData(){
   const d=await api('GET','/api/data');syncAt=new Date().toISOString();stats=null;
-  if(me.role==='investor')inv=d;else{db=normalize(d);S={...SDEF,...(me.settings||{})};linked=new Set(d.links||[]);linkU={};(d.linkUsers||[]).forEach(x=>linkU[x.clientId]=x.uid);fetchNotes()}
+  if(me.role==='investor')inv=d;else{db=normalize(d);obApply();stale=null;snapSoon();S={...SDEF,...(me.settings||{})};linked=new Set(d.links||[]);PROPS=d.props||[];linkU={};(d.linkUsers||[]).forEach(x=>linkU[x.clientId]=x.uid);fetchNotes()}
 }
 async function put(kind,item){
   DV++;  const arr=db[KIND[kind]];if(!arr.includes(item))arr.push(item);
   if(LOCAL){saveLocal();autoBackupSoon();return item}
-  try{const r=await api('PUT',`/api/items/${kind}/${item.id}`,item);Object.assign(item,r.item);syncAt=new Date().toISOString();stats=null}catch(e){await loadData().catch(()=>{});render();throw e}
-  autoBackupSoon();return item;
+  const e=obAdd('put',kind,item);
+  try{const r=await api('PUT',`/api/items/${kind}/${item.id}`,item);Object.assign(item,r.item);syncAt=new Date().toISOString();stats=null;obMark(e,'ok')}
+  catch(x){if(x.net){obMark(e,'wait',x.message);netNote();snapSoon();autoBackupSoon();return item}
+    obMark(e,'err',x.message);await loadData().catch(()=>{});render();throw x}
+  snapSoon();autoBackupSoon();return item;
 }
 async function del(kind,id){
-  DV++;  db[KIND[kind]]=db[KIND[kind]].filter(x=>x.id!==id);
-  if(LOCAL)saveLocal();else{await api('DELETE',`/api/items/${kind}/${id}`);syncAt=new Date().toISOString();stats=null}
+  DV++;  const old=db[KIND[kind]].find(x=>x.id===id);db[KIND[kind]]=db[KIND[kind]].filter(x=>x.id!==id);
+  if(LOCAL)saveLocal();else{
+    OB=OB.filter(x=>!(x.t==='put'&&x.kind===kind&&x.iid===id&&x.st!=='ok'));
+    const e=obAdd('del',kind,id,{title:obTitle(kind,old)});
+    try{await api('DELETE',`/api/items/${kind}/${id}`);obMark(e,'ok');syncAt=new Date().toISOString();stats=null}
+    catch(x){if(x.net){obMark(e,'wait',x.message);netNote()}else{obMark(e,'err',x.message);throw x}}snapSoon()}
   autoBackupSoon();
 }
+let netT=0;function netNote(){if(Date.now()-netT>6000){netT=Date.now();setTimeout(()=>toast('Нет связи — сохранено на устройстве, отправится автоматически'),400)}}
 async function saveS(patch){Object.assign(S,patch);if(LOCAL)saveLocal();else{const r=await api('POST','/api/account',{settings:patch});me=r.user}}
+
+/* ---------- журнал отправки на сервер (очередь с повтором) ----------
+   Каждое сохранение/удаление/фото попадает в OB. Нет связи — запись остаётся «не отправлено» (красная точка),
+   изменение хранится на устройстве и уходит само при появлении сети, по кнопке «Обновить» или круглой кнопкой «Отправить». */
+let OB=[],obBusy=false;
+const obKey=()=>'xf_ob_'+(me&&me.id||0);
+function obLoad(){try{OB=JSON.parse(localStorage.getItem(obKey())||'[]')}catch(e){OB=[]}}
+function obSave(){const keep=[],ok=[];OB.forEach(e=>(e.st==='ok'?ok:keep).push(e));OB=[...keep,...ok.slice(-60)].sort((a,b)=>a.ts-b.ts);try{localStorage.setItem(obKey(),JSON.stringify(OB))}catch(e){}}
+const obPend=()=>OB.filter(e=>e.st!=='ok').length;
+function kvs(op,key,val){return new Promise((res,rej)=>{let r;try{r=indexedDB.open('xfinance',1)}catch(e){return rej(e)}
+  r.onupgradeneeded=()=>r.result.createObjectStore('kv');r.onerror=()=>rej(r.error);
+  r.onsuccess=()=>{const t=r.result.transaction('kv',op==='get'?'readonly':'readwrite'),s=t.objectStore('kv'),q=op==='get'?s.get(key):op==='del'?s.delete(key):s.put(val,key);q.onsuccess=()=>res(q.result);q.onerror=()=>rej(q.error)}})}
+function obTitle(kind,x){
+  if(!x)return'Запись';
+  if(kind==='client')return'Контакт · '+fio(x);
+  if(kind==='contract'){const c=db.clients.find(y=>y.id===x.clientId);return'Договор'+(x.no?' №'+x.no:'')+(c?' · '+fio(c):x.item?' · '+x.item:'')}
+  if(kind==='debt')return(x.type==='out'?'Мой долг':'Долг')+' · '+fio(x);
+  if(kind==='investor')return'Инвестор · '+fio(x);
+  return'Запись';
+}
+function obAdd(t,kind,item,extra){
+  const iid=item&&item.id||item;let e=t==='put'&&OB.find(x=>x.t==='put'&&x.kind===kind&&x.iid===iid&&x.st!=='ok');
+  if(!e){e={id:uid(),t,kind,iid,ts:Date.now()};OB.push(e)}
+  Object.assign(e,{st:'go',err:'',at:Date.now(),title:extra&&extra.title||obTitle(kind,typeof item==='object'?item:db[KIND[kind]]&&db[KIND[kind]].find(x=>x.id===iid))},extra||{});
+  if(t==='put')e.data=JSON.parse(JSON.stringify(item));
+  obSave();return e;
+}
+function obMark(e,st,err){e.st=st;e.err=err||'';e.at=Date.now();if(st!=='ok')e.n=(e.n||0)+1;obSave();bell();if(npOpen&&ntab==='out')npRender()}
+const obLog=(title,sub)=>{const e={id:uid(),t:'log',title,sub,ts:Date.now(),at:Date.now(),st:'ok'};OB.push(e);obSave();if(npOpen&&ntab==='out')npRender()};
+/* после загрузки с сервера вернуть поверх свои ещё не отправленные изменения */
+function obApply(){
+  for(const e of OB){if(e.st==='ok'||e.st==='err')continue;const k=KIND[e.kind];if(!k||!db[k])continue;
+    if(e.t==='put'){const i=db[k].findIndex(x=>x.id===e.iid);if(i<0)db[k].push(e.data);else db[k][i]=e.data}
+    else if(e.t==='del')db[k]=db[k].filter(x=>x.id!==e.iid)}
+  DV++;
+}
+async function obSend(e){
+  if(e.t==='put'){const arr=db[KIND[e.kind]];let it=arr.find(x=>x.id===e.iid);if(!it){it=e.data;arr.push(it)}
+    const r=await api('PUT',`/api/items/${e.kind}/${e.iid}`,it);Object.assign(it,r.item)}
+  else if(e.t==='del')await api('DELETE',`/api/items/${e.kind}/${e.iid}`).catch(x=>{if(!/не найден/i.test(x.message))throw x});
+  else if(e.t==='file'){const blob=await kvs('get','ob:'+e.id);if(!blob)throw new Error('Файл не найден на устройстве — добавьте его заново');
+    const c=db.clients.find(x=>x.id===e.iid);if(!c)throw new Error('Контакт удалён');
+    const r=await api('POST',`/api/files?item=${c.id}&name=${encodeURIComponent(e.name||'photo.jpg')}`,blob,e.type);c.files=c.files||[];c.files.push(r.file);
+    if(!c.mainPhoto&&r.file.type!=='application/pdf')c.mainPhoto=r.file.id;kvs('del','ob:'+e.id).catch(()=>{});await put('client',c)}
+  syncAt=new Date().toISOString();stats=null;
+}
+async function obRun(e){
+  obMark(e,'go');try{await obSend(e);obMark(e,'ok');return true}
+  catch(x){obMark(e,x.net?'wait':'err',x.message);return false}
+}
+async function obFlush(quiet){
+  if(LOCAL||obBusy||!me)return 0;const list=OB.filter(e=>e.st!=='ok'&&e.st!=='go');if(!list.length)return 0;obBusy=true;let ok=0;
+  for(const e of list.sort((a,b)=>a.ts-b.ts)){if(await obRun(e))ok++;else if(e.st==='wait')break}
+  obBusy=false;DV++;if(ok&&!quiet)toast(ok===1?'Изменение отправлено на сервер':`Отправлено на сервер: ${ok}`);
+  if(ok&&!$('#layer .ov'))render();return ok;
+}
+addEventListener('online',()=>obFlush());
+document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'&&obPend())obFlush(true)});
 
 /* ---------- расчёты ---------- */
 let DV=0;const CC=new WeakMap(),DC=new WeakMap();
@@ -222,7 +302,8 @@ function home(){
   const overdue=ks.filter(x=>x.k.status==='overdue').sort((a,b)=>b.k.days-a.k.days),lim=iso(new Date(Date.now()+14*864e5));
   const soon=ks.filter(x=>x.k.status==='active'&&x.k.next.date<=lim).sort((a,b)=>a.k.next.date<b.k.next.date?-1:1),d=new Date();
   const title=S.inst&&S.debt?'Рассрочка и долги':S.inst?'Исламская рассрочка':'Учёт долгов';
-  let h=`<div class="top"><div><h1>${esc(me.company||'X-Finance')}</h1><div class="sub">${title} · ${d.getDate()} ${MON[d.getMonth()]}</div></div></div><div class="home"><div>
+  let h=`<div class="top"><div><h1>${esc(me.company||'X-Finance')}</h1><div class="sub">${title} · ${d.getDate()} ${MON[d.getMonth()]}</div></div></div>${instBanner()}<div class="home"><div>
+  ${me.tariff&&me.tariff.status==='expired'?`<a class="card tbanner" href="#/tariff">${I.cal}<div><b>Тариф закончился</b><span>Продлите тариф, чтобы продолжить работу</span></div>${I.back}</a>`:''}
   <div class="kpis" style="margin-top:0">`;
   if(S.inst)h+=kpi(I.cash,'gold','Долг клиентов',recv,'k-recv',{href:'#/contracts',a:'tab',t:'active'})+
     kpi(I.alert,'warn'+(over?' hot':''),'Просрочено',over,'k-over',{href:'#/contracts',a:'tab',t:'overdue'})+
@@ -260,12 +341,19 @@ function contractCats(){const ks=db.contracts.map(c=>({c,k:calc(c)})),n={};for(c
 const contracts=()=>`<div class="top"><h1>Договоры</h1><div class="row-btns" style="flex-wrap:nowrap"><button class="btn primary only-desk" data-a="newContract">${I.plus}Договор</button></div></div>${contractCats()}
   <input class="search" id="q" placeholder="Поиск по клиенту или товару" value="${esc(q)}"><div id="list">${contractsList()}</div>`;
 const kv=(l,v,cls='')=>`<div class="kv"><span>${l}</span><b class="num ${cls}">${v}</b></div>`;
+/* заявки «клиент сообщил об оплате» — у владельца на странице долга/договора */
+function propBox(itemId){
+  const ps=PROPS.filter(p=>p.itemId===itemId);if(!ps.length)return'';
+  return`<div class="props">${ps.map(p=>`<div class="card prop" data-prop="${p.id}"><span class="ci">${I.card}</span>
+    <div class="g"><b>${esc(p.who||'Клиент')} сообщил об оплате</b><div class="pv num">${money(p.amount)}</div><small>${fdate(p.date)}${p.note?' · '+esc(p.note):''}</small></div>
+    <div class="pa"><button class="btn sm primary" data-a="propAcc" data-id="${p.id}">${I.check}Принять</button><button class="btn sm" data-a="propDec" data-id="${p.id}">Отклонить</button></div></div>`).join('')}</div>`;
+}
 function contract(id){
   const c=db.contracts.find(x=>x.id===id);if(!c)return notFound();
   const k=calc(c),cl=client(c.clientId),iv=investor(c.investorId),t=today(),paidRows=k.rows.filter(r=>r.st==='paid').length;
   return`<a class="back" href="#/contracts">${I.back}Договоры</a>
   <div class="top"><div><h1>${esc(c.item)}</h1><div class="sub">Договор №${c.no} от ${dmy(c.date)}</div></div>${chipC(k)}</div>
-  <div class="card hero"><div class="l">${k.status==='done'?'Выплачено полностью':'Остаток долга'}</div>
+  ${propBox(c.id)}<div class="card hero"><div class="l">${k.status==='done'?'Выплачено полностью':'Остаток долга'}</div>
     <div class="v">${N(k.status==='done'?k.total:k.left,'c'+c.id)}</div>
     ${k.overdue?`<div class="s" style="color:var(--warn)">Из них просрочено ${money(k.overdue)} · ${pdays(k.days)}</div>`:''}
     <div class="bar${k.status==='overdue'?' warn':''}"><b style="width:${k.pct}%"></b></div>
@@ -435,7 +523,7 @@ function debtPage(id){
   const k=dcalc(d),isIn=d.type==='in';
   return`<a class="back" href="#/debts">${I.back}Долги</a>
   <div class="top"><div><h1>${esc(fio(d))}</h1><div class="sub">${isIn?'Должен мне':'Я должен'} · с ${fdate(d.date)}${d.phone?' · '+esc(d.phone):''}</div></div>${k.status!=='active'?chipD(d,k):`<div class="ava">${esc(ini(d))}</div>`}</div>
-  <div class="card hero"><div class="l">${k.status==='done'?'Долг закрыт':isIn?'Осталось вернуть':'Осталось отдать'}</div><div class="v">${N(k.left,'d'+d.id)}</div>
+  ${propBox(d.id)}<div class="card hero"><div class="l">${k.status==='done'?'Долг закрыт':isIn?'Осталось вернуть':'Осталось отдать'}</div><div class="v">${N(k.left,'d'+d.id)}</div>
     <div class="bar${k.status==='overdue'?' warn':''}"><b style="width:${k.pct}%"></b></div>
     <div class="s" style="display:flex;justify-content:space-between;margin-top:8px"><span>Всего ${money(k.add)} · возвращено ${money(k.paid)}</span><span>${d.due?'до '+fdate(d.due):'без срока'}</span></div></div>
   <div class="acts"><button class="card act" data-a="op" data-k="pay" data-id="${d.id}"${k.left<=0?' disabled style="opacity:.45"':''}><span>${I.minus}</span>${isIn?'Принять оплату':'Отдал часть'}</button>
@@ -445,7 +533,7 @@ function debtPage(id){
   ${isIn?linkCard(d,'должника'):''}
   <h2>История</h2>
   <div class="card rows">${d.ops.length?d.ops.slice().reverse().sort((a,b)=>a.date<b.date?1:a.date>b.date?-1:0).map(o=>`<div class="rw ${o.kind}${o.id===flashId?' flash':''}" data-row="${o.id}"><div class="n">${o.kind==='add'?I.plus:I.minus}</div>
-    <div class="g"><b>${o.kind==='add'?'Долг':'Оплата'}</b><small>${fdate(o.date)}${o.note?' · '+esc(o.note):''}${o.confirmed?' · подтверждено должником':''}</small></div>
+    <div class="g"><b>${o.kind==='add'?'Долг':'Оплата'}</b><small>${fdate(o.date)}${o.note?' · '+esc(o.note):''}${o.srv?' · по заявке клиента':''}${o.confirmed?' · подтверждено должником':o.disputed?' · <b style="color:var(--warn)">должник не согласен</b>':''}</small></div>
     <div class="am num">${o.kind==='add'?'+':'−'}${money(o.amount)}</div><button class="x" data-a="delOp" data-id="${d.id}" data-p="${o.id}" aria-label="Удалить">${I.x}</button></div>`).join(''):'<div class="pad muted small">Операций пока нет.</div>'}</div>
   <div class="row-btns" style="margin-top:22px"><button class="btn" data-a="editDebt" data-id="${d.id}">Изменить</button><button class="btn danger" data-a="delDebt" data-id="${d.id}">Удалить</button></div>`;
 }
@@ -487,8 +575,14 @@ function settings(){
   ${mem?'<div class="card pad small" style="color:var(--warn);margin-bottom:12px">Браузер не разрешает сохранять данные в этом режиме. Установите приложение на сервер, чтобы записи не пропадали.</div>':''}
   ${LOCAL?`<div class="card pad note">Сейчас приложение работает без сервера: данные хранятся только на этом устройстве. Регистрация, ссылки для должников, уведомления, фото документов и кабинет инвестора включаются после установки на сервер.</div>`
   :''}
-  <h2 style="margin-top:0">Аккаунт</h2>
+  <h2 style="margin-top:0">Вход и регистрация</h2>
+  ${LOCAL?'':`<div class="aut" style="margin-bottom:10px"><button class="card autb" data-a="authSwitch" data-m="login"><span class="ci">${I.users}</span><b>Вход</b><small>Войти в другой аккаунт</small></button>
+    <button class="card autb" data-a="authSwitch" data-m="reg"><span class="ci gold">${I.plus}</span><b>Регистрация</b><small>Создать новый аккаунт</small></button></div>`}
   <a class="card menu" href="#/account" style="border-radius:var(--r)"><span>${LOCAL?'Без сервера':esc(me.name||me.login)}<br><small>${LOCAL?'Синхронизация и резервная копия':esc(me.login)+' · '+esc(me.phone||'телефон не указан')+' · синхронизация, вход и регистрация'}</small></span>${I.back}</a>
+  <h2>Тарифы</h2>
+  ${tariffCard()}
+  <h2>Приложение</h2>
+  ${instCard()}<div style="height:10px"></div>${zoomCard()}
   <h2>Разделы</h2>
   <div class="card rows"><div class="sw"><div>Рассрочка<small>Договоры, клиенты, графики платежей, инвесторы</small></div><button class="tog${S.inst?' on':''}" data-a="mode" data-k="inst" aria-label="Режим рассрочки"></button></div>
     <div class="sw"><div>Долги<small>Кто должен мне и кому должен я</small></div><button class="tog${S.debt?' on':''}" data-a="mode" data-k="debt" aria-label="Режим долгов"></button></div></div>
@@ -500,20 +594,31 @@ function settings(){
   ${backupBlock()}
   <h2>О приложении</h2>
   <div class="card rows"><a class="menu" href="#/policy">Политика обработки персональных данных${I.back}</a>
-    <div class="pad note">X-Finance 2.0. Рассрочка по правилам мурабаха: цена фиксируется при заключении договора, за просрочку нет ни пени, ни штрафов.</div></div>
+    <div class="pad note">X-Finance 2.2. Рассрочка по правилам мурабаха: цена фиксируется при заключении договора, за просрочку нет ни пени, ни штрафов.</div></div>
+  ${serverBlock()}
   <div style="margin-top:22px"><button class="btn danger block" data-a="${LOCAL?'wipe':'delAccount'}">${LOCAL?'Удалить все данные':'Удалить аккаунт и все данные'}</button></div>`;
 }
 /* ---------- уведомления и связи ---------- */
-async function fetchNotes(){if(LOCAL||!me||me.role!=='owner')return;fetchX();try{const r=await api('GET','/api/notes');NI=r;bell();if(location.hash.startsWith('#/inbox')&&!$('#layer .ov'))render()}catch(e){}}
+let lastNote=0;
+async function fetchNotes(){if(LOCAL||!me||me.role!=='owner')return;fetchX();try{const r=await api('GET','/api/notes');NI=r;bell();
+    const top=r.notes&&r.notes[0]?r.notes[0].id:0,fresh=lastNote&&r.notes.filter(n=>n.id>lastNote);lastNote=Math.max(lastNote,top);
+    if(fresh&&fresh.length){   // ответ другой стороны меняет суммы — подтянуть данные, чтобы остаток обновился у обоих
+      if(fresh.some(n=>['confirm','dispute','prop','linked'].includes(n.kind)))loadData().then(()=>{if(!$('#layer .ov'))render()}).catch(()=>{});
+      if(fresh.some(n=>['op','propok','propno','link'].includes(n.kind))){shared=null;if(location.hash.startsWith('#/inbox'))loadShared()}}if(npOpen)npRender();if(location.hash.startsWith('#/inbox')&&!$('#layer .ov'))render()}catch(e){}}
+let rBusy=false;
 function bell(){
-  let b=$('#bell');const show=!LOCAL&&me&&me.role==='owner'&&!pub&&!$('#app').classList.contains('bare');
-  if(!show){if(b)b.remove();return}
-  if(!b){b=document.createElement('a');b.id='bell';b.href='#/inbox';b.setAttribute('aria-label','Уведомления');document.body.append(b)}
-  const n=NI.unread||0,on=location.hash.startsWith('#/inbox');
+  let b=$('#bell'),rf=$('#rfr');const show=!!me&&me.role==='owner'&&!pub&&!$('#app').classList.contains('bare');
+  if(!show){if(b)b.remove();if(rf)rf.remove();return}
+  if(!rf){rf=document.createElement('button');rf.id='rfr';rf.dataset.a='refresh';rf.setAttribute('aria-label','Обновить');document.body.append(rf)}
+  const pn=obPend(),pgOn=PG.on&&!LOCAL&&!rBusy,html=pgOn?`<span class="pgb"><b${PG.ms!=null&&PG.ms>=100?' class="l3"':''}>${PG.ms==null?(PG.at?'—':'…'):PG.ms>999?'1k+':PG.ms}</b><small>${PG.ms==null&&PG.at?'нет':'мс'}</small></span>${I.sync}<i></i>`:I.sync+'<i></i>';
+  if(rf.dataset.h!==html){rf.innerHTML=html;rf.dataset.h=html}
+  rf.className='bellbtn rfr'+(rBusy?' rolling':'')+(pn?' pend':'')+(pgOn?' pg '+pq(PG.ms):'');rf.style.setProperty('--pq',PG.ms==null?0:Math.max(.08,Math.min(1,1-PG.ms/400)));rf.title=pn?`Не отправлено: ${pn}. Нажмите, чтобы отправить и обновить`:'Обновить данные';
+  if(!b){b=document.createElement('button');b.id='bell';b.dataset.a='bellOpen';b.setAttribute('aria-label','Уведомления');document.body.append(b)}
+  const n=NI.unread||0,on=npOpen||location.hash.startsWith('#/inbox');
   b.className='bellbtn'+(on?' on':'')+(n?' ring':'');b.innerHTML=I.bell+(n?`<i>${n>99?'99+':n}</i>`:'');
 }
 const ago=s=>{const m=Math.round((Date.now()-new Date(s))/6e4);if(m<1)return'только что';if(m<60)return m+' мин назад';const h=Math.round(m/60);if(h<24)return h+' ч назад';const d=Math.round(h/24);return d===1?'вчера':d<7?pdays(d)+' назад':dmy(s.slice(0,10))};
-const NK={msg:['send','sky'],link:['users','gold'],linked:['check','ok'],confirm:['check','ok'],op:['coin','sky']};
+const NK={prop:['card','gold'],propok:['check','ok'],propno:['ban','warn'],dispute:['alert','warn'],pay:['check','ok'],msg:['send','sky'],link:['users','gold'],linked:['check','ok'],confirm:['check','ok'],op:['coin','sky']};
 let NIat=0;
 function inboxPage(sub){
   if(Date.now()-NIat>5000){NIat=Date.now();setTimeout(fetchNotes,0)}
@@ -524,10 +629,7 @@ function inboxPage(sub){
   if(itab==='notes'){
     if(!n)body=`<div class="card pad muted small">Загрузка…</div>`;
     else if(!n.length)body=`<div class="card">${empty(I.bell,'Уведомлений пока нет','Здесь будут приглашения от других пользователей X-Finance, подтверждения от должников и операции по вашим общим долгам.')}</div>`;
-    else body=`<div class="card rows">${n.map(x=>{const[ic,t]=NK[x.kind]||['bell','ink'];
-      const act=x.kind==='link'?(x.status==='pending'?`<div class="nact"><button class="btn sm primary" data-a="linkAcc" data-id="${x.ref}">${I.check}Принять</button><button class="btn sm" data-a="linkDec" data-id="${x.ref}">Отклонить</button></div>`
-        :`<span class="chip ${x.status==='accepted'?'ok':''}" style="margin-top:8px">${x.status==='accepted'?'Принято':'Отклонено'}</span>`):'';
-      return`<div class="rw nt${x.read?'':' new'}"><div class="n ${t}">${I[ic]}</div><div class="g"><b>${esc(x.title)}</b><small class="nb">${esc(x.body)}</small><small>${ago(x.created)}</small>${act}</div>${x.url&&x.kind!=='link'?`<a class="x" href="${esc(x.url)}" aria-label="Открыть">${I.back}</a>`:''}</div>`}).join('')}</div>`;
+    else body=`${NI.unread?`<div style="display:flex;justify-content:flex-end;margin:-4px 0 8px"><button class="btn sm soft" data-a="noteAll">${I.check}Отметить всё прочитанным</button></div>`:''}<div class="card rows">${n.map(x=>noteItem(x)).join('')}</div>`;
   }else{
     if(!shared){loadShared();body=`<div class="card pad muted small">Загрузка…</div>`}
     else if(!shared.length)body=`<div class="card">${empty(I.users,'Пока пусто','Если другой пользователь X-Finance добавит вас в контакты и вы примете приглашение, здесь будут ваши долги и рассрочки у него.')}</div>`;
@@ -535,7 +637,7 @@ function inboxPage(sub){
       const owe=sumBy(cs,y=>y.k.left)+sumBy(p.debts.filter(d=>d.type==='in'),d=>dcalc(d).left),back=sumBy(p.debts.filter(d=>d.type==='out'),d=>dcalc(d).left);
       return`<div class="card shh"><div class="ava" style="background:var(--gold-soft);color:var(--gold)">${esc((p.company||'?')[0].toUpperCase())}</div><div class="g"><b>${esc(p.company)}</b><small>Я должен ${money(owe)}${back?` · мне должны ${money(back)}`:''}</small></div>
         ${p.ownerPhone?`<a class="x" href="https://wa.me/${waPhone(p.ownerPhone)}" target="_blank" rel="noopener" aria-label="WhatsApp">${I.wa}</a>`:''}<button class="x" data-a="linkLeave" data-id="${x.id}" aria-label="Отключить">${I.x}</button></div>
-        <div class="list" style="margin:10px 0 22px" data-link="${x.id}">${cs.map(y=>pubContractBlock(y.c,'sc'+y.c.id)).join('')}${p.debts.map(d=>pubDebtBlock(d,'sd'+d.id)).join('')}${!cs.length&&!p.debts.length?'<div class="card pad muted small">Записей пока нет.</div>':''}</div>`}).join('');
+        <div class="list" style="margin:10px 0 22px" data-link="${x.id}">${cs.map(y=>pubContractBlock(y.c,'sc'+y.c.id,0,x.id,(x.props||[]).filter(q=>q.itemId===y.c.id))).join('')}${p.debts.map(d=>pubDebtBlock(d,'sd'+d.id,0,x.id,(x.props||[]).filter(q=>q.itemId===d.id))).join('')}${!cs.length&&!p.debts.length?'<div class="card pad muted small">Записей пока нет.</div>':''}</div>`}).join('');
   }
   return`<div class="top"><div><h1>Уведомления</h1><div class="sub">Приглашения, подтверждения и общие долги</div></div></div>${tabs}<div id="ibody">${body}</div>
   <a class="card menu" href="#/ops" style="margin-top:14px;border-radius:var(--r)"><span>Все операции<br><small>Полный журнал оформлений и платежей</small></span>${I.back}</a>`;
@@ -683,6 +785,159 @@ const checkPage=()=>`<div class="top"><div><h1>Проверка клиента</
   <div class="chks">${I.search}<input class="search" id="cq" placeholder="Телефон или ФИО" value="${esc(cq)}" inputmode="search" autocomplete="off" enterkeyhint="search"></div>
   <div id="ckr">${checkResults()}</div>`;
 
+/* ---------- панель уведомлений (колокольчик) ---------- */
+let npOpen=false,ntab='notes';
+function noteItem(x,compact){
+  const[ic,t]=NK[x.kind]||['bell','ink'];
+  const act=x.kind==='prop'?(x.status==='pending'?`<div class="nact"><button class="btn sm primary" data-a="propAcc" data-id="${x.ref}">${I.check}Принять</button><button class="btn sm" data-a="propDec" data-id="${x.ref}">Отклонить</button></div>`
+    :`<span class="chip ${x.status==='accepted'?'ok':''}" style="margin-top:8px">${x.status==='accepted'?'Оплата принята':x.status==='declined'?'Отклонено':'Закрыто'}</span>`):x.kind==='link'?(x.status==='pending'?`<div class="nact"><button class="btn sm primary" data-a="linkAcc" data-id="${x.ref}">${I.check}Принять</button><button class="btn sm" data-a="linkDec" data-id="${x.ref}">Отклонить</button></div>`
+    :`<span class="chip ${x.status==='accepted'?'ok':''}" style="margin-top:8px">${x.status==='accepted'?'Принято':'Отклонено'}</span>`):'';
+  return`<div class="rw nt${x.read?'':' new'}" data-note="${x.id}"><div class="n ${t}">${I[ic]}</div>
+    <div class="g"${x.url&&x.kind!=='link'?` data-a="noteGo" data-id="${x.id}" data-u="${esc(x.url)}" style="cursor:pointer"`:''}><b>${esc(x.title)}</b><small class="nb">${esc(x.body)}</small><small>${x.read?'':'<i class="dotn"></i>'}${ago(x.created)}</small>${act}</div>
+    <button class="x nx" data-a="noteDel" data-id="${x.id}" aria-label="Закрыть уведомление">${I.x}</button></div>`;
+}
+const tm=t=>{const d=new Date(t),n=new Date();return(d.toDateString()===n.toDateString()?'':d.toLocaleDateString('ru-RU',{day:'numeric',month:'short'})+' ')+d.toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'})};
+function obRow(e){
+  const pend=e.st!=='ok',go=e.st==='go',ic=e.t==='file'?I.file:e.t==='del'?I.trash:e.t==='log'?I.card:e.kind==='client'?I.users:e.kind==='contract'?I.doc:e.kind==='debt'?I.rub:I.chart;
+  const what=e.t==='file'?'Документ':e.t==='del'?'Удаление':e.t==='log'?(e.sub||'Отчёт'):'Сохранение';
+  const st=go?'Отправляется…':e.st==='ok'?'Отправлено':e.st==='wait'?'Не отправлено — нет связи':'Ошибка: '+e.err;
+  return`<div class="rw ob ${e.st}" data-ob="${e.id}">${pend?'<i class="obdot"></i>':''}<div class="n">${ic}</div>
+    <div class="g"><b>${esc(e.title)}</b><small>${esc(what)} · ${tm(e.at||e.ts)}</small><small class="obs">${e.st==='ok'?I.check:''}${esc(st)}</small></div>
+    ${pend?`<button class="obb${go?' go':''}" data-a="obGo" data-id="${e.id}" aria-label="${e.st==='err'?'Повторить':'Отправить'}" title="${e.st==='err'?'Повторить':'Отправить'}">${e.st==='err'?I.sync:I.upl}</button>`:'<span class="obok">'+I.cloud+'</span>'}</div>`;
+}
+function npBody(){
+  if(LOCAL&&ntab!=='ops')return`<div class="obh">${I.cloud}<div><b>${ntab==='out'?'Данные хранятся на этом устройстве':'Локальный режим'}</b><small>${ntab==='out'?'Без сервера ничего не отправляется. Резервная копия — в Настройках.':'Уведомления, приглашения и отправка на сервер работают, когда приложение открыто с сервера и вы вошли в аккаунт.'}</small></div></div>`+(ntab==='notes'?`<button class="npall" data-a="ntab" data-t="ops">Посмотреть все операции${I.back}</button>`:'');
+  if(ntab==='out'){const pn=obPend(),list=OB.slice().sort((a,b)=>(b.st!=='ok')-(a.st!=='ok')||(b.at||b.ts)-(a.at||a.ts));
+    return`<div class="obh ${pn?'warn':''}">${pn?I.alert:I.cloud}<div><b>${pn?plural(pn,['изменение не отправлено','изменения не отправлены','изменений не отправлено']):'Всё отправлено на сервер'}</b><small>${pn?'Хранятся на устройстве и уйдут сами, когда появится связь':syncAt?'Последняя синхронизация '+tm(syncAt):'Изменения, документы и отчёты'}</small></div>${pn?`<button class="btn sm primary" data-a="obAll">${I.upl}Отправить всё</button>`:''}</div>`
+      +(list.length?list.map(obRow).join(''):empty(I.cloud,'Пока ничего не отправлялось','Здесь появится каждое изменение: контакты, договоры, долги, платежи, фото документов и заявки.'));}
+  if(ntab==='ops'){const ops=allOps().slice(0,25);
+    return ops.length?ops.map(o=>`<a class="rw op ${o.tone}" href="${o.href}" data-a="npClose"><div class="n">${o.icon}</div><div class="g"><b>${esc(o.who)}</b><small>${esc(o.title)} · ${dmy(o.date)}</small></div><div class="am num">${o.kind==='shift'?'':o.sign+money(o.amount)}</div></a>`).join('')
+      +`<a class="npall" href="#/ops" data-a="npClose">Все операции${I.back}</a>`:empty(I.list,'Операций пока нет');}
+  const n=NI.notes;if(!n)return`<div class="pad muted small">Загрузка…</div>`;
+  return n.length?n.slice(0,40).map(x=>noteItem(x,1)).join('')+`<a class="npall" href="#/inbox" data-a="npClose">Все уведомления и общие долги${I.back}</a>`
+    :empty(I.bell,'Уведомлений нет','Здесь будут приглашения, подтверждения от должников, ответы на оплату тарифа и сообщения.');
+}
+function npRender(){
+  const p=$('#np');if(!p)return;const u=NI.unread||0;
+  p.querySelector('.nph').innerHTML=`<div><b>Уведомления</b><small>${u?plural(u,['непрочитанное','непрочитанных','непрочитанных']):'Всё прочитано'}</small></div>
+    ${u?`<button class="btn sm soft" data-a="noteAll">${I.check}Прочитано</button>`:''}<button class="x" data-a="npClose" aria-label="Закрыть">${I.x}</button>`;
+  const pn=obPend();
+  p.querySelector('.npt').innerHTML=`<button class="${ntab==='notes'?'on':''}" data-a="ntab" data-t="notes">Уведомления${u?`<em>${u}</em>`:''}</button><button class="${ntab==='ops'?'on':''}" data-a="ntab" data-t="ops">Операции</button><button class="${ntab==='out'?'on':''}" data-a="ntab" data-t="out">Отправка${pn?`<em>${pn}</em>`:''}</button>`;
+  p.querySelector('.npl').innerHTML=npBody();
+}
+function npToggle(open,silent){
+  npOpen=open;const old=$('#npw');
+  if(!open){if(old){old.classList.add('closing');setTimeout(()=>old.remove(),200)}bell();if(!silent)ovDone('np');return}
+  ovOpen('np',()=>npToggle(false,true));
+  if(old)old.remove();
+  const w=document.createElement('div');w.id='npw';w.className='npw';w.dataset.a='npOut';
+  w.innerHTML=`<div class="np" id="np"><div class="nph"></div><div class="seg npt"></div><div class="npl rows"></div></div>`;document.body.append(w);npRender();bell();fetchNotes();
+}
+/* ---------- установка и размер интерфейса ---------- */
+const XS=window.XS||{state:()=>['info','',''],f:1,setZoom(){},install:async()=>false};
+const ZS=[[.9,'Меньше'],[1,'Обычный'],[1.1,'Крупнее'],[1.2,'Крупный']];
+function instCard(){
+  const[k,t,x]=XS.state(),ic=k==='ok'?I.check:k==='warn'?I.alert:I.share;
+  return`<div class="card inst ${k}"><span class="ci">${ic}</span><div><b>${t}</b><small>${esc(x)}</small>
+    ${k==='go'?`<button class="btn primary sm" data-a="install" style="margin-top:10px">${I.plus}Установить</button>`:''}</div></div>`;
+}
+function zoomCard(){
+  return`<div class="card pad"><div class="zh"><b>Размер интерфейса</b><small>Только на этом устройстве · на компьютере также Ctrl + / Ctrl −</small></div>
+  <div class="seg zs" style="margin:10px 0 0">${ZS.map(([v,l])=>`<button class="${Math.abs(XS.f-v)<.01?'on':''}" data-a="zoom" data-v="${v}">${l}</button>`).join('')}</div></div>`;
+}
+const instBanner=()=>{let off=false;try{off=localStorage.getItem('xf_inst_x')==='1'}catch(e){}
+  const k=XS.state()[0];if(off||!(k==='go'||k==='ios'))return'';
+  return`<div class="card ibn"><img src="${LOCAL?'icon-192.png':'/icon-192.png'}" alt=""><div><b>X-Finance на ${XS.ios?'экран «Домой»':'рабочий стол'}</b><span>${k==='go'?'Открывается в своём окне, работает без сети':'«Поделиться» → «На экран „Домой“»'}</span></div>
+  ${k==='go'?`<button class="btn primary sm" data-a="install">Установить</button>`:''}<button class="x" data-a="instX" aria-label="Скрыть">${I.xmark}</button></div>`};
+/* ---------- сервер: пинг в кнопке «Обновить» и раздел «Сервер» в Настройках ---------- */
+const PG={on:lsGet('xf_ping')==='1',ms:null,hist:[],at:0,busy:false};let SRV=null,srvAt=0;
+const pq=ms=>ms==null?'off':ms<100?'good':ms<250?'mid':'bad';
+const pqName=ms=>ms==null?'Нет связи':ms<100?'Отлично':ms<250?'Нормально':'Медленно';
+async function pingNow(){if(LOCAL||PG.busy)return PG.ms;PG.busy=true;let best=null;
+  for(let i=0;i<2;i++){const t0=performance.now();try{const r=await fetch('/api/ping?_='+Date.now(),{cache:'no-store',credentials:'same-origin'});if(!r.ok)throw 0;await r.json();const ms=Math.round(performance.now()-t0);best=best==null?ms:Math.min(best,ms)}catch(e){best=null;break}}
+  PG.ms=best;PG.at=Date.now();PG.hist=[...PG.hist,best].slice(-24);PG.busy=false;bell();
+  const v=$('#pgv');if(v){v.className='pgv '+pq(best);v.innerHTML=best==null?'нет связи':best+' <small>мс</small>';const n=$('#pgq');if(n)n.textContent=pqName(best);const sp=$('#pgs');if(sp)sp.innerHTML=spark()}
+  return best}
+setInterval(()=>{if(!document.hidden&&(PG.on||location.hash.startsWith('#/settings')))pingNow()},8000);
+async function loadServer(force){if(LOCAL||(!force&&SRV&&Date.now()-srvAt<20000))return;srvAt=Date.now();try{SRV=await api('GET','/api/server')}catch(e){SRV={error:e.message}}if(location.hash.startsWith('#/settings')&&!$('#layer .ov')){const b=$('#srvb');if(b)b.innerHTML=serverRows()}}
+const dur=s=>{s=+s||0;const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);return d?`${d} д ${h} ч`:h?`${h} ч ${m} мин`:`${m} мин`};
+const gb=b=>(b/1073741824).toLocaleString('ru-RU',{maximumFractionDigits:1})+' ГБ';
+function spark(){const h=PG.hist.filter(x=>x!=null);if(h.length<2)return'';const mx=Math.max(...h,120),w=120,hh=26;
+  return`<svg viewBox="0 0 ${w} ${hh}" class="spk"><polyline fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" points="${PG.hist.map((v,i)=>`${Math.round(i*w/(PG.hist.length-1||1))},${v==null?hh-1:Math.round(hh-2-(v/mx)*(hh-6))}`).join(' ')}"/></svg>`}
+function serverRows(){
+  const r=SRV||{},err=r.error;
+  return kv('Адрес',`<span class="sel">${esc(location.host)}</span>`)+
+    kv('Состояние',stale?'<span class="warn">Нет связи — копия на устройстве</span>':err?'<span class="warn">'+esc(err)+'</span>':'<span class="okc">В сети</span>')+
+    kv('Защищённое соединение',location.protocol==='https:'?'<span class="okc">Да, https</span>':'<span class="warn">Нет — нужен https</span>')+
+    (r.os?kv('Система сервера',esc(r.os)+(r.arch?' · '+esc(r.arch):'')):'')+
+    (r.version?kv('Версия X-Finance',esc(r.version)):'')+(r.node?kv('Node.js',esc(r.node)):'')+
+    (r.uptime!=null?kv('Сервер работает',dur(r.uptime)):'')+
+    (r.mem?kv('Память',`свободно ${gb(r.mem.free)} из ${gb(r.mem.total)}`):'')+
+    (r.cpus?kv('Нагрузка',`${String(r.load).replace('.',',')} · ядер: ${r.cpus}`):'')+
+    kv('Синхронизация',syncAt?new Date(syncAt).toLocaleString('ru-RU',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}):'—');
+}
+const CMDS=[['Состояние службы','sudo systemctl status xfinance'],['Перезапустить','sudo systemctl restart xfinance'],['Журнал (последние 100 строк)','sudo journalctl -u xfinance -n 100 --no-pager'],
+  ['Обновить с GitHub','cd ~/x-finance && git pull && sudo bash server/install.sh'],['Копия всех данных','sudo tar czf ~/xfinance-$(date +%F).tar.gz -C /opt/xfinance data'],
+  ['Код создания администратора','sudo cat /opt/xfinance/data/ADMIN-SETUP-CODE.txt'],['Обновить систему Ubuntu','sudo apt update && sudo apt upgrade -y']];
+function serverBlock(){
+  if(LOCAL)return`<h2>Сервер</h2><div class="card pad note">Сейчас приложение работает без сервера (файл открыт с диска). Установите сервер на Ubuntu 24.04 — инструкция в README.md в архиве — и откройте его адрес https://…</div>`;
+  loadServer();if(PG.ms==null&&!PG.busy&&Date.now()-PG.at>3000)setTimeout(pingNow,50);
+  return`<h2>Сервер</h2>
+  <div class="card pgc"><div class="pgh"><div><small>Пинг до сервера</small><div id="pgv" class="pgv ${pq(PG.ms)}">${PG.ms==null?(PG.at?'нет связи':'…'):PG.ms+' <small>мс</small>'}</div><span id="pgq" class="pgq">${PG.at?pqName(PG.ms):'Проверяю…'}</span></div>
+    <div class="pgr"><span id="pgs">${spark()}</span><button class="btn sm soft" data-a="pingNow">${I.sync}Проверить</button></div></div>
+    <div class="sw" style="border-top:1px solid var(--line)"><div>Показывать пинг на главном экране<small>В кружке кнопки «Обновить» вверху справа</small></div><button class="tog${PG.on?' on':''}" data-a="pingTog" aria-label="Показывать пинг"></button></div></div>
+  <div class="card kvs" id="srvb" style="margin-top:10px">${serverRows()}</div>
+  <h2>Обслуживание сервера · Ubuntu 24.04</h2>
+  <div class="card rows cmds">${CMDS.map(([l,c])=>`<div class="cmd"><div class="g"><b>${l}</b><code class="sel">${esc(c)}</code></div><button class="x" data-a="copyCmd" data-v="${esc(c)}" aria-label="Скопировать">${I.copy}</button></div>`).join('')}</div>
+  <p class="note" style="margin:8px 4px 0">Команды вводятся в терминале сервера (SSH). Сервер работает на Ubuntu 24.04 и новее; установка и обновление — <code>sudo bash server/install.sh</code> из папки проекта.</p>`;
+}
+/* ---------- тарифы (встроены в приложение; сервер их обновляет) ---------- */
+const TDEF={name:'Старт',freeUntil:'2027-03-18',price:0,features:'Все функции X-Finance без ограничений: рассрочки, долги, контакты, инвесторы, уведомления, резервные копии',pay:''};
+function tPlan(){let t=null;try{t=JSON.parse(localStorage.getItem('xf_tariff')||'null')}catch(e){}return{...TDEF,...(t||{})}}
+function tSave(t){if(!t||!t.freeUntil)return;const{name,freeUntil,price,features,pay}=t;try{localStorage.setItem('xf_tariff',JSON.stringify({name,freeUntil,price,features,pay}))}catch(e){}}
+function tCalc(p,paid){const d=today(),until=paid&&paid>p.freeUntil?paid:p.freeUntil;
+  return{...p,paidUntil:paid||'',until,status:d<=p.freeUntil&&!(paid>p.freeUntil)?'free':d<=until?'paid':'expired',daysLeft:Math.max(0,Math.round((new Date(until)-new Date(d))/864e5))}}
+function curTariff(){const s=(TF&&TF.tariff)||(me&&me.tariff);if(s){tSave(s);return s}return tCalc(tPlan(),'')}
+let TF=null;
+async function loadTariff(){if(LOCAL)return;try{TF=await api('GET','/api/tariff');if(me)me.tariff=TF.tariff;tSave(TF.tariff)}catch(e){TF={error:e.message}}if(/^#\/(tariff|settings)/.test(location.hash)&&!$('#layer .ov'))render()}
+const tStat=t=>t.status==='free'?['ok','Бесплатно']:t.status==='paid'?['ok','Оплачен']:['warn','Закончился'];
+function tariffCard(){
+  if(!LOCAL&&!TF&&!stale)loadTariff();const t=curTariff();
+  const[c,l]=tStat(t),total=Math.max(1,Math.round((new Date(t.until)-new Date('2026-01-01'))/864e5)),pct=Math.min(100,t.daysLeft/total*100);
+  return`<a class="card tcard" href="#/tariff"><div class="tch"><div><small>Текущий тариф</small><b>${esc(t.name)}</b></div><span class="chip ${c}">${l}</span></div>
+    <div class="tcv">${t.status==='expired'?'Продлите тариф':t.status==='free'?'Бесплатно до '+fdate(t.until):'Оплачен до '+fdate(t.until)}</div>
+    <div class="bar"><b style="width:${pct}%"></b></div><div class="tcs"><span>${t.status==='expired'?'Доступ ограничен':'Осталось '+plural(t.daysLeft,['день','дня','дней'])}</span><span>Подробнее${I.back}</span></div></a>`;
+}
+function tariffPage(){
+  if(!TF&&!LOCAL&&!stale)loadTariff();const t=curTariff();
+  const[c,l]=tStat(t),ps=TF&&TF.payments||[];
+  return`<a class="back" href="#/settings">${I.back}Настройки</a><div class="top"><div><h1>Тарифы</h1><div class="sub">Один тариф — все функции</div></div></div>
+  <div class="card tbig"><div class="tch"><div><small>Тариф</small><b>${esc(t.name)}</b></div><span class="chip ${c}">${l}</span></div>
+    <div class="tprice"><b>${t.status==='free'?'0 ₽':t.price?money(t.price):'—'}</b><span>${t.status==='free'?'до '+fdate(t.freeUntil):t.price?'в месяц':'цена будет объявлена'}</span></div>
+    <p class="note" style="margin:8px 0 0">${esc(t.features)}</p>
+    <div class="tfree">${I.check}<span>До <b>${fdate(t.freeUntil)}</b> все пользователи пользуются X-Finance бесплатно${t.price?`, затем — ${money(t.price)} в месяц`:''}.</span></div>
+    <div class="kvs" style="padding:0;margin-top:10px">${kv('Действует до',dmy(t.until))}${kv('Осталось',plural(t.daysLeft,['день','дня','дней']))}${t.paidUntil?kv('Оплачено до',dmy(t.paidUntil)):''}</div>
+  </div>
+  ${LOCAL||stale?`<div class="card pad note" style="margin-top:12px">${LOCAL?'Оплата тарифа и её подтверждение работают, когда вы вошли в аккаунт на сервере.':'Нет связи с сервером — оплату можно отправить, когда связь появится.'}</div>`
+    :`<button class="btn primary block" style="margin-top:12px" data-a="payTariff">${I.check}${t.status==='free'?'Оплатить заранее':'Сообщить об оплате'}</button>`}
+  ${t.pay?`<h2>Реквизиты для оплаты</h2><div class="card pad" style="white-space:pre-line;font-size:14.5px">${esc(t.pay)}</div>`:''}
+  <h2>Мои оплаты</h2>
+  <div class="card rows">${ps.length?ps.map(p=>`<div class="rw"><div class="g"><b>${money(p.amount)} · ${plural(p.months,['месяц','месяца','месяцев'])}</b><small>${dmy(p.created.slice(0,10))}${p.method?' · '+esc(p.method):''}${p.note?' · '+esc(p.note):''}</small></div>${p.status==='pending'?'<span class="chip gold">На проверке</span>':p.status==='confirmed'?'<span class="chip ok">Подтверждена</span>':'<span class="chip warn">Отклонена</span>'}</div>`).join(''):'<div class="pad muted small">Оплат пока не было.</div>'}</div>`;
+}
+/* ---------- соглашение ---------- */
+function terms(){
+  const o=info.operator||{},op=esc(o.name||'администратор сервиса X-Finance');
+  return`<a class="back" href="#/" onclick="history.length>1&&(history.back(),event.preventDefault())">${I.back}Назад</a><div class="top"><h1>Пользовательское соглашение</h1></div>
+  <div class="card pad policy">
+  <h3 style="margin-top:0">1. Предмет</h3><p>Сервис X-Finance (далее — Сервис) предоставляется ${op} (далее — Администрация) для учёта договоров рассрочки, долгов, платежей и контактов. Регистрируясь, вы принимаете условия этого соглашения (ст. 437, 438 ГК РФ).</p>
+  <h3>2. Аккаунт</h3><p>Регистрация доступна лицам, достигшим 18 лет. Вы обязуетесь указывать достоверные данные, хранить пароль в тайне и отвечаете за действия, совершённые под вашим логином.</p>
+  <h3>3. Данные третьих лиц</h3><p>Внося в Сервис персональные данные клиентов, должников, поручителей и инвесторов, вы действуете как оператор этих данных и обязуетесь получить их согласие на обработку в соответствии с Федеральным законом № 152-ФЗ «О персональных данных».</p>
+  <h3>4. Тариф и оплата</h3><p>До ${fdate((me&&me.tariff&&me.tariff.freeUntil)||'2027-03-18')} Сервис предоставляется бесплатно. Далее — по тарифу, опубликованному в разделе «Тарифы». Оплата подтверждается Администрацией.</p>
+  <h3>5. Ограничения</h3><p>Запрещено использовать Сервис для деятельности, противоречащей законодательству РФ, в том числе для взимания процентов или штрафов, запрещённых законом, и для раскрытия чужих персональных данных. Администрация вправе заблокировать аккаунт при нарушении.</p>
+  <h3>6. Ответственность</h3><p>Сервис предоставляется «как есть». Администрация обеспечивает ежедневное резервное копирование, но не отвечает за убытки, вызванные действиями пользователя или третьих лиц. Рекомендуем регулярно сохранять резервные копии.</p>
+  <h3>7. Прекращение</h3><p>Вы можете удалить аккаунт в любой момент в Настройках → Аккаунт; данные будут удалены с сервера. Вопросы направляйте Администрации.</p></div>`;
+}
+
 /* ---------- все операции ---------- */
 let otab='all',oLimit=60,ktab='all',upClient=null;
 const MONG=['января','февраля','марта','апреля','мая','июня','июля','августа','сентября','октября','ноября','декабря'];
@@ -735,13 +990,17 @@ let authMode='login';
 const brand=(t)=>`<div class="brand"><img src="/icon-192.png" alt="" onerror="this.remove()">${esc(t||'X-Finance')}</div>`;
 function authPage(){
   const reg=authMode==='reg';
-  return`<div class="auth">${brand()}<div class="seg"><button class="${reg?'':'on'}" data-a="authMode" data-m="login">Вход</button><button class="${reg?'on':''}" data-a="authMode" data-m="reg">Регистрация</button></div>
+  const tp=info.tariff?(tSave(info.tariff),{...TDEF,...info.tariff}):tPlan();
+  return`<div class="auth">${brand()}<div class="tstrip">${I.check}<span>Тариф «${esc(tp.name)}» — <b>бесплатно до ${fdate(tp.freeUntil)}</b></span></div><div class="seg"><button class="${reg?'':'on'}" data-a="authMode" data-m="login">Вход</button><button class="${reg?'on':''}" data-a="authMode" data-m="reg">Регистрация</button></div>
   <form class="card pad" id="auth" novalidate>
   ${reg?fld('Фамилия, имя, отчество','name','','autocomplete="name"')+fld('Название компании (необязательно)','company')+fld('Номер телефона','phone','','inputmode="tel" autocomplete="tel" placeholder="8 928 000-00-00"'):''}
   ${fld('Логин','login','','autocomplete="username" autocapitalize="none" spellcheck="false"')}${fld('Пароль'+(reg?' (не короче 8 символов)':''),'password','',`type="password" autocomplete="${reg?'new-password':'current-password'}"`)}
-  ${reg?`<label class="chk"><input type="checkbox" name="consent"><span>Я даю согласие на обработку моих персональных данных и принимаю <a href="#/policy">Политику обработки персональных данных</a> (152-ФЗ).</span></label>`:''}
-  <p class="err" id="aerr"></p><button class="btn primary block" type="submit">${reg?'Зарегистрироваться':'Войти'}</button></form>
-  <p class="note" style="text-align:center;margin-top:14px">Учёт исламской рассрочки и долгов</p></div>`;
+  ${reg?`<div class="agree"><label class="chk"><input type="checkbox" name="consent"><span>Даю <b>согласие на обработку персональных данных</b> в соответствии с Федеральным законом № 152-ФЗ и принимаю <a href="#/policy">Политику обработки персональных данных</a>.</span></label>
+    <label class="chk"><input type="checkbox" name="terms"><span>Принимаю <a href="#/terms">Пользовательское соглашение</a>.</span></label>
+    <label class="chk"><input type="checkbox" name="adult"><span>Мне исполнилось 18 лет.</span></label></div>`:''}
+  <p class="err" id="aerr"></p><button class="btn primary block" type="submit">${reg?'Зарегистрироваться':'Войти'}</button>
+  ${reg?'':`<button type="button" class="forgot" data-a="forgot">Забыли логин или пароль?</button>`}</form>
+  <p class="note" style="text-align:center;margin-top:14px">Учёт исламской рассрочки и долгов</p>${['warn','go','ios'].includes(XS.state()[0])?`<div style="margin-top:14px">${instCard()}</div>`:''}</div>`;
 }
 function policy(){
   const o=info.operator||{},op=esc(o.name||'администратор сервиса X-Finance'),ct=esc(o.contact||(me&&me.phone)||'контакты указаны на сайте');
@@ -764,23 +1023,25 @@ function cabinet(){
   <div class="row-btns" style="margin-top:22px"><button class="btn" data-a="password">Сменить пароль</button>${inv.ownerPhone?`<a class="btn soft" href="https://wa.me/${waPhone(inv.ownerPhone)}" target="_blank" rel="noopener">${I.wa}Написать</a>`:''}</div>`;
 }
 const sortD=a=>a.slice().reverse().sort((x,y)=>x.date<y.date?1:x.date>y.date?-1:0);
-function pubDebtBlock(d,key,big){
+const propList=(ps)=>ps&&ps.length?`<div class="myprops">${ps.map(p=>`<div class="mp ${p.status}"><i></i><span>${p.status==='pending'?'Ждёт подтверждения':p.status==='accepted'?'Принято':'Не подтверждено'} · <b class="num">${money(p.amount)}</b> · ${fdate(p.date)}</span></div>`).join('')}</div>`:'';
+function pubDebtBlock(d,key,big,lk,ps){
   const k=dcalc(d),mine=d.type==='in';
   return`<div class="card ${big?'hero':'pubc'}"><div class="l">${k.status==='done'?'Долг закрыт. Баракаллаху фикум!':mine?'Ваш долг':'Вам должны'}${d.note&&!big?' · '+esc(d.note):''}</div><div class="v">${N(k.left,key,1)}</div>
     <div class="bar${k.status==='overdue'?' warn':''}"><b style="width:${k.pct}%"></b></div>
     <div class="s" style="display:flex;justify-content:space-between;margin-top:8px"><span>Возвращено ${money(k.paid)} из ${money(k.add)}</span><span${k.status==='overdue'?' style="color:var(--warn)"':''}>${d.due?'до '+fdate(d.due):''}</span></div>
   ${big?'</div><h2>История</h2><div class="card rows">':'<div class="rows inner">'}${sortD(d.ops).map(o=>`<div class="rw ${o.kind}"><div class="n">${o.kind==='add'?I.plus:I.minus}</div>
     <div class="g"><b>${o.kind==='add'?'Долг':'Оплата'} <span class="num">${money(o.amount)}</span></b><small>${fdate(o.date)}${o.note?' · '+esc(o.note):''}</small></div>
-    ${o.confirmed?`<span class="chip ok">${I.check}Подтверждено</span>`:`<button class="btn sm soft" data-a="confirmOp" data-id="${o.id}" data-d="${d.id}">Подтвердить</button>`}</div>`).join('')}</div>${big?'':'</div>'}`;
+    ${o.confirmed?`<span class="chip ok">${I.check}Подтверждено</span>`:`<div class="oa">${o.disputed?'<span class="chip warn">Оспорено</span>':''}<button class="btn sm soft" data-a="confirmOp" data-id="${o.id}" data-d="${d.id}">${I.check}Принять</button>${lk&&!o.disputed?`<button class="btn sm ghost" data-a="dispute" data-lk="${lk}" data-id="${o.id}" data-d="${d.id}">Не согласен</button>`:''}</div>`}</div>`).join('')}</div>
+  ${lk?propList(ps)+(k.left>0?`<div class="pact"><button class="btn primary block" data-a="propose" data-lk="${lk}" data-item="${d.id}" data-left="${k.left}" data-out="${mine?'':'1'}">${I.card}${mine?'Сообщить об оплате':'Мне вернули'}</button></div>`:''):''}${big?'':'</div>'}`;
 }
-function pubContractBlock(p,key,big){
+function pubContractBlock(p,key,big,lk,ps){
   const c={cost:p.total,markup:0,down:p.down,months:p.months,first:p.first_pay,payments:p.payments,shifts:p.shifts},k=calc(c);
   const sched=k.rows.map(r=>`<div class="rw ${r.st}"><div class="n">${r.st==='paid'?I.check:r.n}</div><div class="g"><b>${dmy(r.date)}</b><small>${r.st==='paid'?'Оплачен':r.st==='overdue'?'Просрочен':r.got?'Внесено '+money(r.got):'Ожидается'}</small></div><div class="am num">${money(r.amount)}</div></div>`).join('');
   return`<div class="card ${big?'hero':'pubc'}"><div class="l">${k.status==='done'?'Рассрочка выплачена. Баракаллаху фикум!':big?'Остаток по рассрочке':esc(p.item)+' · №'+p.no}</div><div class="v">${N(k.left,key,1)}</div>
     ${k.overdue?`<div class="s" style="color:var(--warn)">Просрочено ${money(k.overdue)} · ${pdays(k.days)}</div>`:k.next?`<div class="s">Ближайший платёж ${money(k.next.rest)} до ${fdate(k.next.date)}</div>`:''}
     <div class="bar${k.status==='overdue'?' warn':''}"><b style="width:${k.pct}%"></b></div>
     <div class="s" style="display:flex;justify-content:space-between;margin-top:8px"><span>${big?esc(p.item)+' · договор №'+p.no:'Оплачено '+money(k.paid)}</span><span>${big?'оплачено '+money(k.paid):'из '+money(k.fin)}</span></div>
-  ${big?`</div><h2>График платежей</h2><div class="card rows">${sched}</div>`:`<details class="sch"><summary>График платежей <span>${k.rows.filter(r=>r.st==='paid').length}/${k.rows.length}</span></summary><div class="rows inner">${sched}</div></details></div>`}`;
+  ${big?`</div><h2>График платежей</h2><div class="card rows">${sched}</div>`:`<details class="sch"><summary>График платежей <span>${k.rows.filter(r=>r.st==='paid').length}/${k.rows.length}</span></summary><div class="rows inner">${sched}</div></details>${lk?propList(ps)+(k.left>0?`<div class="pact"><button class="btn primary block" data-a="propose" data-lk="${lk}" data-item="${p.id}" data-left="${k.left}" data-next="${k.next?k.next.rest:''}">${I.card}Сообщить об оплате</button></div>`:''):''}</div>`}`;
 }
 function pubPage(){
   if(!pubData)return`<div class="auth">${brand()}<div class="card">${empty(I.doc,'Страница не найдена','Ссылка устарела или была удалена. Попросите прислать новую.')}</div></div>`;
@@ -806,21 +1067,23 @@ const offlinePage=()=>`<div class="auth">${brand()}<div class="card">${empty(I.g
 
 /* ---------- отрисовка ---------- */
 let lastRoute=null;
-function render(){
+function render(){renderCore();try{backLabels()}catch(e){}}
+function renderCore(){
   DV++;
   const route=location.hash.replace(/^#\/?/,''),[name,id]=route.split('/'),m=$('#main'),nv=$('#nav');
   let html,bare=true;
   if(offline)html=offlinePage();
   else if(name==='policy')html=policy();
+  else if(name==='terms')html=terms();
   else if(pub)html=pubPage();
   else if(!me)html=authPage();
   else if(me.role==='investor')html=cabinet();
   else{
     bare=false;
-    const pages={'':home,check:checkPage,chat:()=>chatPage(id),account:accountPage,inbox:()=>inboxPage(id),ops:opsPage,contracts,contract:()=>contract(id),clients,client:()=>clientPage(id),debts,debt:()=>debtPage(id),investors,investor:()=>investorPage(id),settings};
-    html=(pages[name]||home)();
+    const pages={'':home,tariff:tariffPage,check:checkPage,chat:()=>chatPage(id),account:accountPage,inbox:()=>inboxPage(id),ops:opsPage,contracts,contract:()=>contract(id),clients,client:()=>clientPage(id),debts,debt:()=>debtPage(id),investors,investor:()=>investorPage(id),settings};
+    html=staleBar()+(pages[name]||home)();
   }
-  m.className=(bare||['contract','debt','investor','settings','ops','inbox','account','chat','check'].includes(name)||(name==='client'&&!id)?'narrow':'')+(route!==lastRoute?' enter':'');lastRoute=route;
+  m.className=(bare||['contract','debt','investor','settings','ops','inbox','account','chat','check','tariff'].includes(name)||(name==='client'&&!id)?'narrow':'')+(route!==lastRoute?' enter':'');lastRoute=route;
   m.innerHTML=html;$('#app').classList.toggle('bare',bare);nv.hidden=bare;
   m.querySelectorAll('.list>*,.kpis>*').forEach((e,i,a)=>e.style.setProperty('--i',Math.min([...e.parentNode.children].indexOf(e),12)));
   if(!bare){
@@ -834,14 +1097,42 @@ function render(){
   $('#app').classList.toggle('full',!bare&&(name==='client'||name==='chat')&&!!id);if(name!=='chat')chatUid=null;if(name==='client'&&id)pagerInit();
   document.querySelectorAll('body>.cdock,body>.chatbar').forEach(e=>e.remove());m.querySelectorAll('.cdock,.chatbar').forEach(dk=>document.body.append(dk));if(name==='chat')scrollChat();  // нижние кнопки вне анимируемого main, чтобы всегда были прижаты к низу экрана
   runCounts();flashId=null;bell();
-  if(name==='inbox'&&itab==='notes'&&NI.unread&&!LOCAL){NI.unread=0;bell();api('POST','/api/notes/read').catch(()=>{})}
 }
+/* ---------- кнопка «Назад»: одно нажатие = одно действие ----------
+   Каждое окно (лист, подтверждение, меню «+», панель уведомлений, просмотр фото) добавляет один шаг в историю.
+   «Назад» (кнопка телефона, жест, браузер, Esc, «← …» в приложении) закрывает только верхнее окно,
+   а если окон нет — возвращает на предыдущий экран. Переходы между экранами — через nav(). */
+const OV=[];let backing=0,pendingNav=null,pushLater=0,HS=[location.hash||'#/'],replacing=false;
+function hb(n){backing++;history.go(-n)}
+function ovOpen(id,close){if(OV.some(o=>o.id===id))return;OV.push({id,close});if(backing)pushLater++;else history.pushState({xo:OV.length},'',location.href)}
+function ovDone(id){const i=OV.findIndex(o=>o.id===id);if(i<0)return;OV.splice(i,1);if(pushLater){pushLater--;return}hb(1)}
+function nav(h){
+  if(OV.length){const n=OV.length-pushLater;OV.splice(0).reverse().forEach(o=>o.close(true));pushLater=0;pendingNav=h;if(n>0)hb(n);else{pendingNav=null;nav(h)}return}
+  if(backing){pendingNav=h;return}
+  if(location.hash===h)render();else location.hash=h;
+}
+function navBack(fallback){if(OV.length)return history.back();if(HS.length>1)history.back();else{replacing=true;location.replace(fallback||'#/')}}
+addEventListener('popstate',()=>{
+  if(backing){backing--;if(backing)return;
+    while(pushLater){pushLater--;history.pushState({xo:1},'',location.href)}
+    if(pendingNav!=null){const h=pendingNav;pendingNav=null;nav(h)}return}
+  if(OV.length){const o=OV.pop();o.close(true)}
+});
+addEventListener('keydown',e=>{if(e.key==='Escape'&&OV.length){e.preventDefault();history.back()}});
+const SECN={'':'Главная',contracts:'Договоры',debts:'Долги',clients:'Контакты',settings:'Настройки',ops:'Все операции',inbox:'Уведомления',account:'Аккаунт',check:'Проверка клиента',tariff:'Тарифы',investors:'Инвесторы',policy:'Политика',terms:'Соглашение'};
+function secName(h){const[,a='',b]=(h||'#/').split('/');
+  if(a==='client'){const c=db.clients.find(x=>x.id===b);return c?fio(c):'Контакт'}
+  if(a==='contract'){const c=db.contracts.find(x=>x.id===b);return c?'Договор №'+c.no:'Договор'}
+  if(a==='debt'){const d=db.debts.find(x=>x.id===b);return d?fio(d):'Долг'}
+  if(a==='investor')return'Инвестор';if(a==='chat')return'Переписка';return SECN[a]||'Назад'}
+function backLabels(){const prev=HS.length>1?HS[HS.length-2]:null;if(!prev)return;document.querySelectorAll('#app a.back').forEach(a=>{a.innerHTML=I.back+esc(secName(prev))})}
 /* ---------- меню «плюс» ---------- */
 let plusOpen=false;
-function plusMenu(open){
+function plusMenu(open,silent){
   plusOpen=open;const b=$('#nav .pl');if(b){b.classList.toggle('open',open);b.setAttribute('aria-expanded',open)}
   const old=$('#pm');
-  if(!open){if(old){old.classList.add('closing');setTimeout(()=>old.remove(),230)}return}
+  if(!open){if(old){old.classList.add('closing');setTimeout(()=>old.remove(),230)}if(!silent)ovDone('plus');return}
+  ovOpen('plus',()=>plusMenu(false,true));
   if(old)old.remove();
   const w=document.createElement('div');w.id='pm';w.className='pm';w.dataset.a='plusOut';
   w.innerHTML=`<div class="pmc" id="pmc">${plusMain()}</div>`;document.body.append(w);
@@ -862,38 +1153,42 @@ function plusMain(){
 }
 function plusSwap(html,back){const c=$('#pmc');if(!c)return;c.classList.remove('fwd','bwd');void c.offsetWidth;c.innerHTML=html;c.classList.add(back?'bwd':'fwd')}
 let lastSec=null,skipClose=false;
-function go(h){if(location.hash===h)render();else{skipClose=true;location.hash=h}}
-addEventListener('hashchange',()=>{const p=location.hash.split('/')[1]||'';if(p!==lastSec){q='';if(pendingCat){catOpen=true;pendingCat=false}else{catOpen=false;ctab='all';ktab='all'}}lastSec=p;if(skipClose)skipClose=false;else closeSheet(true);if(plusOpen)plusMenu(false);render();scrollTo(0,0)});
+function go(h){if(location.hash===h&&!OV.length&&!backing)render();else{skipClose=true;nav(h)}}
+addEventListener('hashchange',()=>{const p=location.hash.split('/')[1]||'';if(p!==lastSec){q='';if(pendingCat){catOpen=true;pendingCat=false}else{catOpen=false;ctab='all';ktab='all'}}lastSec=p;
+  const h=location.hash||'#/';if(replacing){replacing=false;HS[HS.length-1]=h}else if(HS.length>1&&HS[HS.length-2]===h)HS.pop();else if(HS[HS.length-1]!==h)HS.push(h);if(HS.length>60)HS.shift();
+  if(skipClose)skipClose=false;else if(OV.length){OV.splice(0).reverse().forEach(o=>o.close(true));pushLater=0}
+  if(plusOpen)plusMenu(false,true);if(npOpen)npToggle(false,true);render();scrollTo(0,0)});
 
 /* ---------- окна ---------- */
 let onSubmit=null,gen=0,busy=false;
 function sheet(title,body,submit,okLabel='Сохранить'){
-  gen++;onSubmit=submit;
+  gen++;onSubmit=submit;ovOpen('sheet',()=>closeSheet(true,true));
   $('#layer').innerHTML=`<div class="ov" data-a="closeOv"><form class="sheet" id="form" novalidate autocomplete="off">
   <div class="hd"><b>${title}</b><button type="button" class="x" data-a="close" aria-label="Закрыть">${I.x}</button></div>
   ${body}${okLabel?`<p class="err" id="err"></p><button class="btn primary block" type="submit">${okLabel}</button>`:''}</form></div>`;
   const f=$('#form input:not([type=hidden]):not([type=checkbox]),#form select');if(f&&matchMedia('(min-width:960px)').matches)f.focus();
 }
 function confirmBox(title,text,ok,cb,danger=true){
-  gen++;onSubmit=cb;
+  gen++;onSubmit=cb;ovOpen('sheet',()=>closeSheet(true,true));
   $('#layer').innerHTML=`<div class="ov" data-a="closeOv"><form class="sheet" id="form"><div class="hd"><b>${title}</b><button type="button" class="x" data-a="close">${I.x}</button></div>
   <p class="note" style="font-size:15px;margin:0 0 16px">${text}</p><p class="err" id="err"></p><div class="row-btns"><button type="button" class="btn" data-a="close">Отмена</button><button class="btn ${danger?'danger':'primary'}" type="submit">${ok}</button></div></form></div>`;
 }
 function dangerBox(title,text,ok,cb){
-  gen++;onSubmit=async()=>{await cb()};
+  gen++;onSubmit=async()=>{await cb()};ovOpen('sheet',()=>closeSheet(true,true));
   $('#layer').innerHTML=`<div class="ov" data-a="closeOv"><form class="sheet cfm" id="form">
     <div class="cfi"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><g class="lid"><path d="M4 7h16"/><path d="M9 7V4.500h6V7"/></g><path d="M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M10 11v6M14 11v6"/></svg></div>
     <b>${title}</b><p>${text}</p><p class="err" id="err"></p>
     <div class="row-btns"><button type="button" class="btn" data-a="close">Отмена</button><button class="btn dng" type="submit">${I.trash}${ok}</button></div></form></div>`;
 }
-function closeSheet(now){
+function closeSheet(now,silent){
+  if(!silent)ovDone('sheet');
   const ov=$('#layer .ov');onSubmit=null;pend=[];delF=[];if(!ov)return;
   if(now===true){$('#layer').innerHTML='';return}
   const g=gen;ov.classList.add('closing');setTimeout(()=>{if(g===gen)$('#layer').innerHTML=''},190);
 }
 let lastWa=null;
 function doneSheet(title,text,r,phone,waText,link){
-  gen++;onSubmit=null;lastWa={phone,text:waText};
+  gen++;onSubmit=null;lastWa={phone,text:waText};ovOpen('sheet',()=>closeSheet(true,true));
   $('#layer').innerHTML=`<div class="ov" data-a="closeOv"><div class="sheet"><div class="done">
   <svg class="ok" viewBox="0 0 84 84"><circle cx="42" cy="42" r="38"/><path d="M26 43l11 11 21-23"/></svg><b>${title}</b><p>${esc(text)}</p>
   ${r.wa?`<span class="chip ok">${I.wa}Отправлено в WhatsApp</span>`:''}${r.push?`<span class="chip ok">${I.bell}Уведомление доставлено</span>`:''}
@@ -1015,7 +1310,8 @@ function clientForm(c,after){
     if(!LOCAL&&(up.length||rm.length)){
       for(const id of rm){await api('DELETE','/api/files/'+id).catch(()=>{});c.files=c.files.filter(x=>x.id!==id)}
       let i=0;for(const p of up){i++;const b=$('#form [type=submit]');if(b)b.textContent=`Загрузка фото ${i} из ${up.length}…`;
-        const r=await api('POST',`/api/files?item=${c.id}&name=${encodeURIComponent(p.name)}`,p.blob,p.type);c.files.push(r.file)}
+        try{const r=await api('POST',`/api/files?item=${c.id}&name=${encodeURIComponent(p.name)}`,p.blob,p.type);c.files.push(r.file)}
+        catch(x){if(!x.net)throw x;const q=obAdd('file','client',c.id,{name:p.name,type:p.type,title:'Фото · '+fio(c)});await kvs('put','ob:'+q.id,p.blob);obMark(q,'wait',x.message);netNote()}}
       if(c.mainPhoto&&!c.files.some(x=>x.id===c.mainPhoto))c.mainPhoto='';
       await put('client',c);
     }
@@ -1122,16 +1418,16 @@ const A={
   plus:()=>plusMenu(!plusOpen),
   plusOut:(d,el,ev)=>{if(ev.target===el)plusMenu(false)},
   pmPay:()=>{plusMenu(false);setTimeout(pickPay,120)},
-  pmCheck:()=>{plusMenu(false);location.hash='#/check';setTimeout(()=>{const i=$('#cq');if(i)i.focus()},350)},
+  pmCheck:()=>{plusMenu(false);nav('#/check');setTimeout(()=>{const i=$('#cq');if(i)i.focus()},350)},
   pmContact:()=>{plusMenu(false);setTimeout(()=>clientForm(),120)},
-  pmOps:()=>{plusMenu(false);location.hash='#/ops'},
+  pmOps:()=>{plusMenu(false);nav('#/ops')},
   otab:d=>{otab=d.t;oLimit=60;$('#list').innerHTML=opsList();runCounts()},
   oMore:()=>{oLimit+=100;$('#list').innerHTML=opsList()},
   pmInst:()=>{plusMenu(false);setTimeout(()=>contractForm(),120)},
   pmDebt:()=>{plusMenu(false);setTimeout(()=>debtForm(),120)},
   newContract:d=>contractForm(null,d.client),
   editContract:d=>contractForm(db.contracts.find(c=>c.id===d.id)),
-  delContract:d=>confirmBox('Удалить договор?','Договор и все его платежи будут удалены без возможности восстановления.','Удалить',async()=>{await del('contract',d.id);location.hash='#/contracts'}),
+  delContract:d=>confirmBox('Удалить договор?','Договор и все его платежи будут удалены без возможности восстановления.','Удалить',async()=>{await del('contract',d.id);nav('#/contracts')}),
   mk:(d,el)=>{$('#form').mmode.value=d.m;el.parentNode.querySelectorAll('button').forEach(b=>b.classList.toggle('on',b===el));updSum()},
   shift:d=>{const c=db.contracts.find(x=>x.id===d.id),k=calc(c),from=k.rows.findIndex(r=>r.rest>0);if(from<0)return;
     sheet('Перенести график',`<div class="note" style="margin:-4px 2px 14px">Все неоплаченные платежи, начиная с ${dmy(k.rows[from].date)}, сдвинутся на выбранный срок. Сумма договора не меняется — без доплат и штрафов.</div>
@@ -1153,24 +1449,24 @@ const A={
     $('#fpick2').click()},
   pay:d=>payContract(db.contracts.find(x=>x.id===d.id),d.v),
   monthExp:()=>monthSheet('exp'),monthGot:()=>monthSheet('got'),
-  delPay:d=>confirmBox('Удалить платёж?','Сумма вернётся в остаток долга.','Удалить',async()=>{const c=db.contracts.find(x=>x.id===d.id);closeSheet(true);await vanish(d.p);c.payments=c.payments.filter(p=>p.id!==d.p);await put('contract',c);render();return'keep'}),
+  delPay:d=>confirmBox('Удалить платёж?','Сумма вернётся в остаток долга.','Удалить',async()=>{const c=db.contracts.find(x=>x.id===d.id);closeSheet(true);await vanish(d.p);if((c.payments.find(p=>p.id===d.p)||{}).srv)c.dropped=[...(c.dropped||[]),d.p];c.payments=c.payments.filter(p=>p.id!==d.p);await put('contract',c);render();return'keep'}),
   setAmt:d=>{$('#form').amount.value=String(d.v).replace('.',',')},
   newClient:()=>clientForm(),
   editClient:d=>clientForm(db.clients.find(c=>c.id===d.id)),
   delClient:d=>{const c=db.clients.find(x=>x.id===d.id),n=db.contracts.filter(x=>x.clientId===c.id).length+db.debts.filter(x=>x.contactId===c.id).length;
     dangerBox('Удалить контакт?',`<b>${esc(fio(c))}</b> переместится в «Удалённые».<br>Все данные${n?`, договоры и долги (${n})`:''} останутся на сервере — контакт можно восстановить в любой момент.`,'Удалить',async()=>{
       const m=$('#main');m.classList.add('leave');await new Promise(r=>setTimeout(r,260));
-      c.deleted=today();await put('client',c);toast('Контакт перемещён в «Удалённые»');location.hash='#/clients';setTimeout(()=>m.classList.remove('leave'),50)})},
+      c.deleted=today();await put('client',c);toast('Контакт перемещён в «Удалённые»');nav('#/clients');setTimeout(()=>m.classList.remove('leave'),50)})},
   restoreClient:async d=>{const c=db.clients.find(x=>x.id===d.id);delete c.deleted;c.deleted='';await put('client',c);toast('Контакт восстановлен');render()},
-  purgeClient:d=>{if(db.contracts.some(c=>c.clientId===d.id)||db.debts.some(x=>x.contactId===d.id))return toast('У контакта есть договоры или долги — навсегда удалить нельзя, можно только хранить в «Удалённых»');confirmBox('Удалить навсегда?','Контакт и фото его документов будут удалены без возможности восстановления.','Удалить навсегда',async()=>{await del('client',d.id);ktab='deleted';catOpen=true;pendingCat=true;location.hash='#/clients'})},
+  purgeClient:d=>{if(db.contracts.some(c=>c.clientId===d.id)||db.debts.some(x=>x.contactId===d.id))return toast('У контакта есть договоры или долги — навсегда удалить нельзя, можно только хранить в «Удалённых»');confirmBox('Удалить навсегда?','Контакт и фото его документов будут удалены без возможности восстановления.','Удалить навсегда',async()=>{await del('client',d.id);ktab='deleted';catOpen=true;pendingCat=true;nav('#/clients')})},
   addFile:()=>$('#fpick').click(),
   rmFile:async(d,el)=>{el.parentNode.classList.add('out');await new Promise(r=>setTimeout(r,250));if(d.f)delF.push(d.f);else{URL.revokeObjectURL(pend[d.i].url);pend.splice(+d.i,1)}const p=$('#pf');if(p)p.innerHTML=filesHtml()},
-  view:d=>{if(d.t==='application/pdf')return window.open('/api/files/'+d.id,'_blank');const v=document.createElement('div');v.className='view';v.innerHTML=`<img src="/api/files/${d.id}" alt="">`;v.onclick=()=>v.remove();document.body.append(v)},
+  view:d=>{if(d.t==='application/pdf')return window.open('/api/files/'+d.id,'_blank');const v=document.createElement('div');v.className='view';v.innerHTML=`<img src="/api/files/${d.id}" alt="">`;v.onclick=()=>{v.remove();ovDone('view')};ovOpen('view',()=>v.remove());document.body.append(v)},
   newInvestor:()=>investorForm(),
   editInvestor:d=>investorForm(investor(d.id)),
   defInvestor:async d=>{const i=investor(d.id);await setDefault(d.id,!i.isDefault);render();toast(i.isDefault?'Инвестор выбран по умолчанию':'Инвестор по умолчанию снят')},
   delInvestor:d=>{if(db.contracts.some(c=>c.investorId===d.id))return toast('К инвестору привязаны договоры');
-    confirmBox('Удалить инвестора?','Инвестор и его доступ в кабинет будут удалены.','Удалить',async()=>{await del('investor',d.id);location.hash='#/investors'})},
+    confirmBox('Удалить инвестора?','Инвестор и его доступ в кабинет будут удалены.','Удалить',async()=>{await del('investor',d.id);nav('#/investors')})},
   access:d=>{const i=investor(d.id);sheet('Доступ инвестора',`<div class="note" style="margin-bottom:12px">Передайте инвестору адрес сайта, логин и пароль. Он увидит только свои договоры и прибыль.</div>${fld('Логин','login',i.login||'','autocapitalize="none" spellcheck="false"')}${fld('Пароль (не короче 8 символов)','password','','type="text" autocomplete="off"')}`,
     async f=>{const r=await api('POST','/api/investor-access',{investorId:i.id,login:f.login,password:f.password});Object.assign(i,r.item);render();toast('Доступ открыт')},i.login?'Сохранить':'Дать доступ')},
   noAccess:d=>confirmBox('Закрыть доступ?','Инвестор больше не сможет войти в кабинет.','Закрыть',async()=>{const i=investor(d.id);await api('DELETE','/api/investor-access/'+i.id);delete i.login;render()}),
@@ -1179,15 +1475,64 @@ const A={
   waLink:d=>{const c=db.clients.find(x=>x.id===d.id),l=linkOf(c);if(!l)return;wa(c.phone,withSign(`Ассаляму алейкум${hello(c)?', '+hello(c):''}!\nВаша личная страница: ${l}\nЗдесь видно все ваши долги и рассрочки, можно подтвердить операции и включить уведомления.`))},
   syncNow:async()=>{await loadData();await loadStats(true);render();toast('Данные загружены с сервера')},
   copyNow:async()=>{if(canDir&&dirH&&AB.get().on){await runAuto(true)}else{download(jsonBackup(),bName('json'));await new Promise(r=>setTimeout(r,600));download(excelBackup(),bName('xlsx'));noteCopy('«Загрузки», вручную')}render();toast('Копия сохранена: JSON и Excel')},
-  authSwitch:async d=>{await api('POST','/api/logout').catch(()=>{});me=null;inv=null;db={clients:[],contracts:[],debts:[],investors:[]};NI={unread:0,shared:0,notes:null};authMode=d.m;location.hash='#/';render()},
+  authSwitch:async d=>{await api('POST','/api/logout').catch(()=>{});me=null;inv=null;db={clients:[],contracts:[],debts:[],investors:[]};NI={unread:0,shared:0,notes:null};authMode=d.m;nav('#/');render()},
   qk:d=>{const t=$('#chatf textarea');t.value=(t.value?t.value+' ':'')+d.v;t.focus()},
   toX:()=>{ktab='x';catOpen=true;pendingCat=true},
+  refresh:async(d,el)=>{if(rBusy)return;rBusy=true;bell();const t0=Date.now();let err='';
+    if(LOCAL){loadLocal();DV++;await new Promise(r=>setTimeout(r,800));rBusy=false;bell();const b=$('#rfr');if(b){b.classList.add('ok');setTimeout(()=>b.classList.remove('ok'),900)}if(!$('#layer .ov'))render();if(npOpen)npRender();return toast('Данные обновлены')}
+    if(stale){await reconnect();if(stale){rBusy=false;bell();return toast('Сервер недоступен — данные в безопасности на устройстве')}}
+    try{await obFlush(true);await loadData();fetchNotes();if(TF)loadTariff();stats=null}catch(x){err=x.message}
+    await new Promise(r=>setTimeout(r,Math.max(0,900-(Date.now()-t0))));rBusy=false;bell();
+    const b=$('#rfr');if(b&&!err){b.classList.add('ok');setTimeout(()=>b.classList.remove('ok'),900)}
+    if(!$('#layer .ov'))render();if(npOpen)npRender();
+    const pn=obPend();toast(err?err:pn?`Обновлено. Не отправлено: ${pn} — нет связи`:'Всё обновлено и отправлено')},
+  obGo:async d=>{const e=OB.find(x=>x.id===d.id);if(!e||e.st==='go')return;const ok=await obRun(e);DV++;
+    toast(ok?'Отправлено на сервер':e.err||'Не удалось отправить');if(ok&&!$('#layer .ov'))render();if(npOpen)npRender()},
+  obAll:async()=>{const n=await obFlush();if(!n)toast(obPend()?'Нет связи с сервером — попробуйте позже':'Всё уже отправлено');if(npOpen)npRender()},
+  propose:d=>{const left=+d.left,def=+d.next||left;
+    sheet(d.out?'Мне вернули':'Сообщить об оплате',`<p class="note" style="margin:-4px 2px 14px">${d.out?'Укажите, сколько вам вернули.':'Укажите, сколько вы оплатили.'} Он получит уведомление и подтвердит — после этого остаток изменится у вас обоих.</p>
+      ${mfld('Сумма, ₽','amount',Math.min(def,left))}${fld('Дата','date',today(),'type="date"')}${fld('Комментарий','note','','placeholder="Например: перевод на карту"')}
+      <p class="note" style="margin:-2px 2px 12px">Остаток сейчас: <b>${money(left)}</b></p>`,
+      async f=>{const a=num(f.amount);if(!(a>0))return'Укажите сумму';if(a>left+.001)return'Сумма больше остатка ('+money(left)+')';
+        await api('POST',`/api/links/${d.lk}/propose`,{itemId:d.item,amount:a,date:f.date,note:f.note});
+        obLog((d.out?'Возврат долга':'Сообщение об оплате')+' · '+money(a),'Ждёт подтверждения');shared=null;loadShared();
+        closeSheet();setTimeout(()=>doneSheet('Отправлено','Как только он подтвердит, остаток уменьшится у вас обоих. Ответ придёт в уведомления.',{},'','',''),200);return'keep'},'Отправить')},
+  dispute:d=>sheet('Не согласны с операцией?',`<p class="note" style="margin:-4px 2px 14px">Он получит уведомление, что вы не согласны. Операция будет отмечена как оспоренная, пока вы её не примете.</p>${fld('Что не так (необязательно)','note','','placeholder="Например: сумма другая"')}`,
+    async f=>{await api('POST',`/api/links/${d.lk}/dispute`,{debtId:d.d,opId:d.id,note:f.note});obLog('Операция оспорена','Отправлено');shared=null;loadShared();toast('Отправлено')},'Отправить'),
+  propAcc:async(d,el)=>{const r=await api('POST',`/api/props/${d.id}/accept`);const p=PROPS.find(x=>x.id==d.id);PROPS=PROPS.filter(x=>x.id!=d.id);
+    const arr=db[KIND[r.kind]],i=arr.findIndex(x=>x.id===r.item.id);if(i<0)arr.push(r.item);else arr[i]=r.item;DV++;
+    const c=el.closest('.prop');if(c){c.classList.add('ok');await new Promise(z=>setTimeout(z,350))}
+    obLog('Оплата клиента принята · '+money(p?p.amount:0),'Остаток пересчитан у обоих');fetchNotes();if(npOpen)npRender();if(!$('#layer .ov'))render();toast('Оплата принята — остаток пересчитан у вас обоих')},
+  propDec:d=>confirmBox('Отклонить оплату?','Клиент получит уведомление, что оплата не подтверждена.','Отклонить',async()=>{await api('POST',`/api/props/${d.id}/decline`);PROPS=PROPS.filter(x=>x.id!=d.id);obLog('Оплата клиента отклонена','Отправлено');fetchNotes();render();toast('Оплата отклонена')}),
+  reconnect:async()=>{toast('Проверяю связь…');await reconnect();if(stale)toast('Сервер пока недоступен — данные в безопасности на устройстве')},
+  pingNow:async(d,el)=>{const s=el.querySelector('svg');if(s)s.style.animation='rspin .8s linear infinite';await pingNow();if(s)s.style.animation='';loadServer(true)},
+  pingTog:(d,el)=>{PG.on=!PG.on;try{localStorage.setItem('xf_ping',PG.on?'1':'0')}catch(e){}el.classList.toggle('on',PG.on);if(PG.on)pingNow();bell();toast(PG.on?'Пинг показывается в кнопке «Обновить»':'Пинг скрыт')},
+  copyCmd:async d=>{try{await navigator.clipboard.writeText(d.v)}catch(e){const a=document.createElement('textarea');a.value=d.v;document.body.append(a);a.select();document.execCommand('copy');a.remove()}toast('Команда скопирована')},
+  bellOpen:()=>npToggle(!npOpen),npClose:()=>npToggle(false),npOut:(d,el,ev)=>{if(ev.target===el)npToggle(false)},
+  ntab:d=>{ntab=d.t;npRender()},
+  noteGo:async d=>{const x=(NI.notes||[]).find(y=>y.id==d.id);if(x&&!x.read){x.read=1;NI.unread=Math.max(0,NI.unread-1);api('POST',`/api/notes/${x.id}/read`).catch(()=>{})}npToggle(false);nav(d.u.replace(/^\/?#/,'#'))},
+  noteDel:async(d,el)=>{const r=el.closest('.rw');r.classList.add('out');const x=(NI.notes||[]).find(y=>y.id==d.id);
+    await new Promise(z=>setTimeout(z,260));NI.notes=NI.notes.filter(y=>y.id!=d.id);if(x&&!x.read)NI.unread=Math.max(0,NI.unread-1);bell();if(npOpen)npRender();else if(location.hash.startsWith('#/inbox'))render();
+    api('DELETE','/api/notes/'+d.id).catch(e=>toast(e.message))},
+  noteAll:async()=>{(NI.notes||[]).forEach(x=>x.read=1);NI.unread=0;bell();if(npOpen)npRender();if(location.hash.startsWith('#/inbox'))render();await api('POST','/api/notes/read');toast('Все уведомления прочитаны')},
+  forgot:()=>sheet('Восстановление доступа',`<p class="note" style="margin:-4px 2px 14px">Укажите логин или номер телефона, с которым регистрировались. Администратор проверит данные и пришлёт новый пароль.</p>
+    ${fld('Логин','login','','autocapitalize="none" spellcheck="false"')}${fld('или номер телефона','phone','','inputmode="tel" placeholder="8 928 000-00-00"')}${fld('Как с вами связаться','contact','','placeholder="WhatsApp, другой номер"')}`,
+    async f=>{await api('POST','/api/recover',f);closeSheet();setTimeout(()=>doneSheet('Заявка отправлена','Администратор проверит данные и свяжется с вами, чтобы выдать новый пароль.',{},'','',''),200);return'keep'},'Отправить заявку'),
+  payTariff:()=>{const t=TF.tariff;sheet('Оплата тарифа',`<div class="field"><span>Срок</span><div class="seg" style="margin:0">${[1,3,6,12].map(m=>`<button type="button" class="${m===1?'on':''}" data-a="tm" data-v="${m}">${m} мес.</button>`).join('')}</div><input type="hidden" name="months" value="1"></div>
+    ${fld('Сумма, ₽','amount',t.price||'','inputmode="decimal"')}<label class="field"><span>Способ</span><select name="method"><option>Перевод на карту</option><option>Наличные</option><option>Другое</option></select></label>
+    ${fld('Комментарий','comment','','placeholder="Например: перевёл с карты на имя …"')}${t.pay?`<div class="card pad small" style="white-space:pre-line;margin-bottom:12px">${esc(t.pay)}</div>`:''}
+    <p class="note" style="margin:-2px 2px 12px">После перевода отправьте заявку — администратор проверит платёж и продлит тариф. Ответ придёт в уведомления.</p>`,
+    async f=>{await api('POST','/api/payments',{...f,amount:num(f.amount)});obLog('Заявка об оплате тарифа',money(num(f.amount))+' · '+plural(+f.months||1,['месяц','месяца','месяцев']));setTimeout(loadTariff,450);toast('Заявка отправлена администратору')},'Отправить заявку')},
+  tm:(d,el)=>{const f=$('#form');f.months.value=d.v;el.parentNode.querySelectorAll('button').forEach(b=>b.classList.toggle('on',b===el));const p=TF&&TF.tariff.price;if(p)f.amount.value=String(p*d.v)},
+  install:async()=>{const ok=await XS.install();if(ok)toast('X-Finance устанавливается');render()},
+  instX:(d,el)=>{try{localStorage.setItem('xf_inst_x','1')}catch(e){}const c=el.closest('.ibn');c.classList.add('out');setTimeout(()=>c.remove(),260)},
+  zoom:d=>{XS.setZoom(+d.v);render()},
   waNum:d=>wa(d.v,`Ассаляму алейкум${d.who?', '+d.who:''}!`),
-  pmSet:()=>{plusMenu(false);location.hash='#/settings'},
+  pmSet:()=>{plusMenu(false);nav('#/settings')},
   editDebt:d=>debtForm(db.debts.find(x=>x.id===d.id)),
-  delDebt:d=>confirmBox('Удалить долг?','Запись и вся история будут удалены.','Удалить',async()=>{await del('debt',d.id);location.hash='#/debts'}),
+  delDebt:d=>confirmBox('Удалить долг?','Запись и вся история будут удалены.','Удалить',async()=>{await del('debt',d.id);nav('#/debts')}),
   op:d=>opDebt(db.debts.find(x=>x.id===d.id),d.k),
-  delOp:d=>confirmBox('Удалить операцию?','Остаток долга будет пересчитан.','Удалить',async()=>{const x=db.debts.find(y=>y.id===d.id);closeSheet(true);await vanish(d.p);x.ops=x.ops.filter(o=>o.id!==d.p);await put('debt',x);render();return'keep'}),
+  delOp:d=>confirmBox('Удалить операцию?','Остаток долга будет пересчитан.','Удалить',async()=>{const x=db.debts.find(y=>y.id===d.id);closeSheet(true);await vanish(d.p);if((x.ops.find(o=>o.id===d.p)||{}).srv)x.dropped=[...(x.dropped||[]),d.p];x.ops=x.ops.filter(o=>o.id!==d.p);await put('debt',x);render();return'keep'}),
   waC:d=>{const c=db.contracts.find(x=>x.id===d.id),k=calc(c),cl=client(c.clientId);
     return remind('contract',c,`Ассаляму алейкум${hello(cl)?', '+hello(cl):''}!\nНапоминаю о платеже по рассрочке «${c.item}».\n`+(k.overdue?`Просрочено: ${money(k.overdue)} (${pdays(k.days)}).`:`Ближайший платёж: ${money(k.next.rest)} до ${fdate(k.next.date)}.`)+`\nОстаток по договору: ${money(k.left)}.`,cl.phone)},
   waCl:d=>{const c=db.clients.find(x=>x.id===d.id);wa(c.phone,`Ассаляму алейкум${hello(c)?', '+hello(c):''}!`)},
@@ -1208,13 +1553,17 @@ const A={
     async f=>{const r=await api('POST','/api/account',{name:f.name,company:f.company,phone:f.phone});me=r.user;render();toast('Сохранено')}),
   password:()=>sheet('Сменить пароль',fld('Старый пароль','old','','type="password" autocomplete="current-password"')+fld('Новый пароль (не короче 8 символов)','password','','type="password" autocomplete="new-password"'),
     async f=>{await api('POST','/api/password',f);toast('Пароль изменён')}),
-  logout:async()=>{await api('POST','/api/logout').catch(()=>{});me=null;inv=null;db={clients:[],contracts:[],debts:[],investors:[]};location.hash='#/';render()},
+  logout:async()=>{await api('POST','/api/logout').catch(()=>{});me=null;inv=null;db={clients:[],contracts:[],debts:[],investors:[]};nav('#/');render()},
   delAccount:()=>{sheet('Удалить аккаунт?',`<p class="note" style="font-size:15px;margin:0 0 14px">Аккаунт, все клиенты, договоры, долги, инвесторы и загруженные документы будут безвозвратно удалены с сервера. Сначала сохраните резервную копию.</p>${fld('Пароль для подтверждения','password','','type="password"')}`,
-    async f=>{await api('POST','/api/account/delete',{password:f.password});me=null;db={clients:[],contracts:[],debts:[],investors:[]};location.hash='#/';render();toast('Аккаунт удалён')},'Удалить навсегда')},
+    async f=>{await api('POST','/api/account/delete',{password:f.password});me=null;db={clients:[],contracts:[],debts:[],investors:[]};nav('#/');render();toast('Аккаунт удалён')},'Удалить навсегда')},
   restore:()=>$('#file').click(),
   wipe:()=>confirmBox('Удалить все данные?','Все записи будут стёрты с этого устройства. Сначала сохраните резервную копию.','Удалить всё',()=>{db={clients:[],contracts:[],debts:[],investors:[]};saveLocal();render();toast('Данные удалены')})
 };
 document.addEventListener('click',async ev=>{
+  const ln=ev.target.closest('a[href^="#"]');
+  if(ln&&!ln.target&&!ev.defaultPrevented){const h=ln.getAttribute('href');
+    if(ln.classList.contains('back')){ev.preventDefault();navBack(h)}
+    else if(OV.length||backing){ev.preventDefault();nav(h)}}
   const el=ev.target.closest('[data-a]');if(!el)return;
   const a=el.dataset.a;if(el.tagName==='A'&&!el.getAttribute('href'))ev.preventDefault();
   try{A[a]&&await A[a](el.dataset,el,ev)}catch(e){toast(e.message||'Ошибка')}
@@ -1224,7 +1573,8 @@ document.addEventListener('submit',async ev=>{
   if(ev.target.id==='chatf'){await sendChat(ev.target);return}
   if(ev.target.id==='auth'){
     const f=Object.fromEntries(new FormData(ev.target)),b=ev.target.querySelector('[type=submit]');b.classList.add('load');
-    try{const r=await api('POST',authMode==='reg'?'/api/register':'/api/login',{...f,consent:!!f.consent});me=r.user;await loadData();location.hash='#/';render();dirInit()}
+    try{if(authMode==='reg'&&!(f.consent&&f.terms&&f.adult)){$('#aerr').textContent='Отметьте согласие на обработку персональных данных, пользовательское соглашение и возраст.';b.classList.remove('load');return}
+    const r=await api('POST',authMode==='reg'?'/api/register':'/api/login',{...f,consent:!!f.consent,terms:!!f.terms,adult:!!f.adult});me=r.user;obLoad();await loadData();HS=['#/'];if(location.hash!=='#/'){replacing=true;location.replace('#/')}render();dirInit()}
     catch(e){$('#aerr').textContent=e.message;b.classList.remove('load')}
     return;
   }
@@ -1251,7 +1601,7 @@ document.addEventListener('input',ev=>{
 });
 document.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey&&e.target.matches&&e.target.matches('#chatf textarea')&&matchMedia('(pointer:fine)').matches){e.preventDefault();$('#chatf').requestSubmit()}});
 document.addEventListener('input',e=>{if(e.target.matches&&e.target.matches('#chatf textarea')){e.target.style.height='';e.target.style.height=Math.min(140,e.target.scrollHeight)+'px'}});
-addEventListener('keydown',e=>{if(e.key==='Escape'){const v=$('.view');if(v)v.remove();else if(plusOpen)plusMenu(false);else closeSheet()}});
+// Esc — тот же «Назад»: обработчик в блоке «кнопка Назад»
 $('#fpick').addEventListener('change',async ev=>{
   const files=[...ev.target.files];ev.target.value='';
   for(const file of files){
@@ -1275,7 +1625,9 @@ $('#fpick2').addEventListener('change',async ev=>{
       const r=await api('POST',`/api/files?item=${c.id}&name=${encodeURIComponent(take[i].name)}`,blob,type);c.files.push(r.file);ok++;
       if(!c.mainPhoto&&r.file.type!=='application/pdf')c.mainPhoto=r.file.id;
       const u=URL.createObjectURL(blob);tmp[i].innerHTML=type==='application/pdf'?`<span class="pdf">${I.file}PDF</span>`:`<img src="${u}" alt="">`;tmp[i].classList.remove('up')}
-    catch(e){tmp[i].remove();toast(e.message)}
+    catch(e){tmp[i].remove();
+      if(e.net){try{const blob=await shrink(take[i]),type=blob.type==='application/pdf'?blob.type:(blob===take[i]?take[i].type:'image/jpeg'),q=obAdd('file','client',c.id,{name:take[i].name,type,title:'Фото · '+fio(c)});await kvs('put','ob:'+q.id,blob);obMark(q,'wait',e.message);netNote()}catch(x){toast(x.message)}}
+      else toast(e.message)}
   }
   if(ok){await put('client',c);toast(ok===1?'Фото добавлено':`Добавлено фото: ${ok}`)}
   if(location.hash==='#/client/'+c.id)render();
@@ -1417,24 +1769,35 @@ document.addEventListener('pointermove',e=>{
 document.addEventListener('pointerout',e=>{const k=e.target.closest&&e.target.closest('.kpi');if(k&&!k.contains(e.relatedTarget)){k.style.setProperty('--rx','0deg');k.style.setProperty('--ry','0deg');k.style.setProperty('--mx','30%');k.style.setProperty('--my','0%')}});
 Object.assign(A,{
   itab:d=>{itab=d.t;if(d.t==='shared')shared=null;render()},
-  linkAcc:async d=>{await api('POST',`/api/links/${d.id}/accept`);toast('Приглашение принято');shared=null;await fetchNotes();itab='shared';render()},
+  linkAcc:async d=>{await api('POST',`/api/links/${d.id}/accept`);toast('Приглашение принято');shared=null;itab='shared';if(npOpen){npToggle(false);if(!location.hash.startsWith('#/inbox')){nav('#/inbox/shared');fetchNotes();return}}await fetchNotes();render()},
   linkDec:async d=>{await api('POST',`/api/links/${d.id}/decline`);toast('Приглашение отклонено');await fetchNotes()},
   linkLeave:d=>confirmBox('Отключить?','Вы перестанете видеть эти долги и получать уведомления о них.','Отключить',async()=>{await api('POST',`/api/links/${d.id}/leave`);shared=null;await fetchNotes();render()}),
   blackTog:(d,el)=>{const w=$('#blk'),on=!el.classList.contains('on');el.classList.toggle('on',on);w.classList.toggle('on',on);$('#form').black.value=on?1:'';if(on)setTimeout(()=>$('#form').blackNote.focus(),300)},
 });
 /* ---------- запуск ---------- */
+addEventListener('xfinstall',()=>{if(/^#\/(settings)?$|^$/.test(location.hash)||!me)render()});
+addEventListener('xfzoom',()=>{if(location.hash.startsWith('#/settings'))render()});
 async function boot(){
+  try{history.scrollRestoration='manual'}catch(e){}
+  if(!location.hash&&location.protocol.startsWith('http')&&!/^\/p\//.test(location.pathname))history.replaceState(null,'','#/');HS=[location.hash||'#/'];
   const web=location.protocol.startsWith('http');
-  if(web&&'serviceWorker' in navigator)navigator.serviceWorker.register('/sw.js').catch(()=>{});
+  if(web&&'serviceWorker' in navigator){const had=!!navigator.serviceWorker.controller;let rl=false;
+    navigator.serviceWorker.addEventListener('controllerchange',()=>{if(had&&!rl&&!$('#layer .ov')){rl=true;location.reload()}});
+    navigator.serviceWorker.register('/sw.js').then(r=>r.update()).catch(()=>{})}
   if(!web)LOCAL=true;
   else try{const r=await fetch('/api/me',{credentials:'same-origin'});if(!r.ok)throw 0;info=await r.json();if(!('user' in info))throw 0;try{localStorage.setItem('xf_server','1')}catch(e){}}
-    catch(e){let known=false;try{known=localStorage.getItem('xf_server')==='1'}catch(e2){}if(known)offline=true;else LOCAL=true}
+    catch(e){let known=false;try{known=localStorage.getItem('xf_server')==='1'}catch(e2){}if(known){const sn=await snapLoad();if(sn&&sn.me)useSnap(sn);else offline=true}else LOCAL=true}
   const m=/^\/p\/([\w-]+)/.exec(location.pathname);
-  if(m&&!LOCAL&&!offline){
+  if(m&&!LOCAL&&!offline&&!stale){
     pub=m[1];try{pubData=await api('GET','/api/public/'+pub)}catch(e){}
     setInterval(async()=>{if(document.hidden||!pubData||$('#layer .ov'))return;try{const n=await api('GET','/api/public/'+pub);if(JSON.stringify(n)!==JSON.stringify(pubData)){pubData=n;if(!location.hash.includes('policy'))render()}}catch(e){}},15000);
-  }else if(LOCAL){loadLocal();me={role:'owner',login:'',name:'',company:'',local:true}}
-  else if(!offline&&info.user){me=info.user;try{await loadData()}catch(e){me=null}}
+  }else if(LOCAL){loadLocal();me={role:'owner',login:'',name:'',company:'',local:true};
+    if(!db.clients.length&&!db.contracts.length&&!db.debts.length){const x=await kvs('get','local').catch(()=>null);if(x&&x.db){db=normalize(x.db);S={...SDEF,...x.S};saveLocal()}}}
+  else if(stale){}
+  else if(!offline&&info.user){me=info.user;obLoad();try{await obFlush(true);await loadData()}catch(e){const sn=e.net&&await snapLoad();if(sn&&sn.me&&sn.me.id===info.user.id)useSnap(sn);else me=null}}
+  if(info.tariff)tSave(info.tariff);
+  try{navigator.storage&&navigator.storage.persist&&navigator.storage.persist()}catch(e){}
+  if(PG.on&&!LOCAL)setTimeout(pingNow,1200);
   if(me&&me.role==='owner')await linkDebts().catch(()=>{});
   render();
   if(me&&me.role==='owner'){await dirInit();setTimeout(()=>runAuto(false),4000)}
