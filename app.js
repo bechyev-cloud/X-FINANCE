@@ -847,7 +847,7 @@ function zoomCard(){
 }
 const instBanner=()=>{let off=false;try{off=localStorage.getItem('xf_inst_x')==='1'}catch(e){}
   const k=XS.state()[0];if(off||!(k==='go'||k==='ios'))return'';
-  return`<div class="card ibn"><img src="${LOCAL?'icon-192.png':'/icon-192.png'}" alt=""><div><b>X-Finance на ${XS.ios?'экран «Домой»':'рабочий стол'}</b><span>${k==='go'?'Открывается в своём окне, работает без сети':'«Поделиться» → «На экран „Домой“»'}</span></div>
+  return`<div class="card ibn"><img src="icon-192.png" alt=""><div><b>X-Finance на ${XS.ios?'экран «Домой»':'рабочий стол'}</b><span>${k==='go'?'Открывается в своём окне, работает без сети':'«Поделиться» → «На экран „Домой“»'}</span></div>
   ${k==='go'?`<button class="btn primary sm" data-a="install">Установить</button>`:''}<button class="x" data-a="instX" aria-label="Скрыть">${I.xmark}</button></div>`};
 /* ---------- сервер: пинг в кнопке «Обновить» и раздел «Сервер» в Настройках ---------- */
 const PG={on:lsGet('xf_ping')==='1',ms:null,hist:[],at:0,busy:false};let SRV=null,srvAt=0;
@@ -880,7 +880,7 @@ const CMDS=[['Состояние службы','sudo systemctl status xfinance']
   ['Обновить с GitHub','cd ~/x-finance && git pull && sudo bash server/install.sh'],['Копия всех данных','sudo tar czf ~/xfinance-$(date +%F).tar.gz -C /opt/xfinance data'],
   ['Код создания администратора','sudo cat /opt/xfinance/data/ADMIN-SETUP-CODE.txt'],['Обновить систему Ubuntu','sudo apt update && sudo apt upgrade -y']];
 function serverBlock(){
-  if(LOCAL)return`<h2>Сервер</h2><div class="card pad note">Сейчас приложение работает без сервера (файл открыт с диска). Установите сервер на Ubuntu 24.04 — инструкция в README.md в архиве — и откройте его адрес https://…</div>`;
+  if(LOCAL)return`<h2>Сервер</h2><div class="card pad note">Сейчас приложение работает без сервера X-Finance (открыто с диска или со статического хостинга, например GitHub Pages): данные хранятся только на этом устройстве, вход, синхронизация и уведомления недоступны. Чтобы всё это работало, установите сервер на Ubuntu 24.04 (инструкция в README.md) и откройте его адрес https://…</div>`;
   loadServer();if(PG.ms==null&&!PG.busy&&Date.now()-PG.at>3000)setTimeout(pingNow,50);
   return`<h2>Сервер</h2>
   <div class="card pgc"><div class="pgh"><div><small>Пинг до сервера</small><div id="pgv" class="pgv ${pq(PG.ms)}">${PG.ms==null?(PG.at?'нет связи':'…'):PG.ms+' <small>мс</small>'}</div><span id="pgq" class="pgq">${PG.at?pqName(PG.ms):'Проверяю…'}</span></div>
@@ -987,7 +987,7 @@ const notFound=()=>`<div class="card">${empty(I.doc,'Запись не найд�
 
 /* ---------- вход, политика, кабинет инвестора, страница должника ---------- */
 let authMode='login';
-const brand=(t)=>`<div class="brand"><img src="/icon-192.png" alt="" onerror="this.remove()">${esc(t||'X-Finance')}</div>`;
+const brand=(t)=>`<div class="brand"><img src="icon-192.png" alt="" onerror="this.remove()">${esc(t||'X-Finance')}</div>`;
 function authPage(){
   const reg=authMode==='reg';
   const tp=info.tariff?(tSave(info.tariff),{...TDEF,...info.tariff}):tPlan();
@@ -1090,7 +1090,7 @@ function renderCore(){
     const sec={contract:'contracts',client:'clients',debt:'debts',investor:'investors'}[name]||name||'',over=S.inst?db.contracts.filter(c=>calc(c).status==='overdue').length:0;
     const both=S.inst&&S.debt,items=[['','Главная',I.home,1,''],['contracts','Договоры',I.doc,S.inst,''],['debts','Долги',I.coin,S.debt&&!S.inst,''],['plus'],['debts','Долги',I.coin,both,''],
       ['clients','Контакты',I.users,1,''],['investors','Инвесторы',I.chart,S.inst,S.debt?'desk':''],['ops','Все операции',I.list,1,'desk'],['settings','Настройки',I.gear,1,'desk']].filter(x=>x[0]==='plus'||x[3]);
-    nv.innerHTML=`<div class="logo"><img src="/icon-192.png" alt="" onerror="this.remove()">X-Finance</div>`+items.map(([h,l,i,,cl])=>h==='plus'
+    nv.innerHTML=`<div class="logo"><img src="icon-192.png" alt="" onerror="this.remove()">X-Finance</div>`+items.map(([h,l,i,,cl])=>h==='plus'
       ?`<button class="pl${plusOpen?' open':''}" data-a="plus" aria-label="Добавить" aria-expanded="${plusOpen}"><span>${I.plus}</span><b>Добавить</b></button>`
       :`<a href="#/${h}" class="${cl}${sec===h||(h==='settings'&&sec==='investors')||false?' on':''}">${i}<span>${l}${h==='contracts'&&over?`<i>${over}</i>`:''}</span></a>`).join('');
   }
@@ -1583,10 +1583,11 @@ document.addEventListener('submit',async ev=>{
   catch(e){const er=$('#err');if(er)er.textContent=e.message;else toast(e.message)}
   finally{busy=false;btn&&btn.classList.remove('load')}
 });
+let qF=0;
 document.addEventListener('input',ev=>{
   const t=ev.target;
   if(t.id==='cq'){cq=t.value;$('#ckr').innerHTML=checkResults();return}
-  if(t.id==='q'){q=t.value;$('#list').innerHTML=location.hash.startsWith('#/clients')?clientsList():location.hash.startsWith('#/ops')?opsList():contractsList();runCounts()}
+  if(t.id==='q'){q=t.value;if(!qF)qF=requestAnimationFrame(()=>{qF=0;const l=$('#list');if(!l)return;l.innerHTML=location.hash.startsWith('#/clients')?clientsList():location.hash.startsWith('#/ops')?opsList():contractsList();runCounts()})}
   else if(t.id==='pq'){const s=t.value.trim().toLowerCase();document.querySelectorAll('#plist .rw').forEach(r=>r.hidden=!!s&&!r.dataset.s.includes(s))}
   else if(t.closest('#form')){
     const f=$('#form');
@@ -1760,12 +1761,14 @@ Object.assign(A,{
 });
 
 /* живые карточки: наклон и блик за курсором */
-document.addEventListener('pointermove',e=>{
-  if(e.pointerType!=='mouse')return;const k=e.target.closest&&e.target.closest('.kpi');if(!k)return;
+let tiltE=null,tiltF=0;   // наклон карточки за мышкой — не чаще одного раза за кадр
+document.addEventListener('pointermove',e=>{if(e.pointerType!=='mouse')return;tiltE=e;if(!tiltF)tiltF=requestAnimationFrame(tiltRun)},{passive:true});
+function tiltRun(){tiltF=0;const e=tiltE;if(!e)return;
+  const k=e.target.closest&&e.target.closest('.kpi');if(!k)return;
   const r=k.getBoundingClientRect(),x=(e.clientX-r.left)/r.width,y=(e.clientY-r.top)/r.height;
   k.style.setProperty('--rx',((.5-y)*7).toFixed(2)+'deg');k.style.setProperty('--ry',((x-.5)*9).toFixed(2)+'deg');
   k.style.setProperty('--mx',(x*100).toFixed(1)+'%');k.style.setProperty('--my',(y*100).toFixed(1)+'%');
-},{passive:true});
+}
 document.addEventListener('pointerout',e=>{const k=e.target.closest&&e.target.closest('.kpi');if(k&&!k.contains(e.relatedTarget)){k.style.setProperty('--rx','0deg');k.style.setProperty('--ry','0deg');k.style.setProperty('--mx','30%');k.style.setProperty('--my','0%')}});
 Object.assign(A,{
   itab:d=>{itab=d.t;if(d.t==='shared')shared=null;render()},
@@ -1783,7 +1786,7 @@ async function boot(){
   const web=location.protocol.startsWith('http');
   if(web&&'serviceWorker' in navigator){const had=!!navigator.serviceWorker.controller;let rl=false;
     navigator.serviceWorker.addEventListener('controllerchange',()=>{if(had&&!rl&&!$('#layer .ov')){rl=true;location.reload()}});
-    navigator.serviceWorker.register('/sw.js').then(r=>r.update()).catch(()=>{})}
+    const root=/^\/p\//.test(location.pathname)?'/':location.pathname.replace(/[^/]*$/,'');navigator.serviceWorker.register(root+'sw.js',{scope:root}).then(r=>r.update()).catch(()=>{})}
   if(!web)LOCAL=true;
   else try{const r=await fetch('/api/me',{credentials:'same-origin'});if(!r.ok)throw 0;info=await r.json();if(!('user' in info))throw 0;try{localStorage.setItem('xf_server','1')}catch(e){}}
     catch(e){let known=false;try{known=localStorage.getItem('xf_server')==='1'}catch(e2){}if(known){const sn=await snapLoad();if(sn&&sn.me)useSnap(sn);else offline=true}else LOCAL=true}
