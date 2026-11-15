@@ -69,6 +69,7 @@ trend:sv('<path d="M4 17l5.500-5.500 3.500 3.500L20 8M15 8h5v5"/>'),
 sync:sv('<path d="M20 11a8 8 0 0 0-14.6-4.5L4 8"/><path d="M4 3.5V8h4.5"/><path d="M4 13a8 8 0 0 0 14.6 4.5L20 16"/><path d="M20 20.5V16h-4.5"/>',2),
 upl:sv('<path d="M12 19V6"/><path d="m6 11 6-6 6 6"/>',2.2),
 cloud:sv('<path d="M7 18a4.5 4.5 0 0 1-.6-8.96A6 6 0 0 1 18 8.5a4.75 4.75 0 0 1-.5 9.5z"/><path d="m9.5 13.5 2 2 3.5-4"/>'),
+grid:sv('<rect x="3.5" y="3.5" width="7" height="7" rx="2"/><rect x="13.5" y="3.5" width="7" height="7" rx="2"/><rect x="3.5" y="13.5" width="7" height="7" rx="2"/><rect x="13.5" y="13.5" width="7" height="7" rx="2"/>'),
 file:sv('<path d="M7 3h7l5 5v12a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z"/><path d="M14 3v5h5"/>')
 };
 
@@ -291,6 +292,70 @@ function monthSheet(kind){
   sheet((kind==='got'?'Получено: ':'Ожидается: ')+MONF[new Date().getMonth()],rows.length?`<div class="card rows" style="margin-bottom:6px">${rows.map(r=>`<a class="rw" href="#/contract/${r.id}"><div class="g"><b>${esc(r.name)}</b><small${r.over?' style="color:var(--warn)"':''}>${dmy(r.date)} · ${esc(r.sub)}${r.over?' · просрочен':''}</small></div><div class="am num">${money(r.amount)}</div></a>`).join('')}</div>`
     :empty(I.cal,kind==='got'?'В этом месяце платежей не было':'В этом месяце платежей не ждём',''),null,null);
 }
+/* ---------- главная → «Платежи»: сегодня, завтра, неделя, месяц, календарь ---------- */
+let htab=lsGet('xf_htab')==='pay'?'pay':'dash',ptab=lsGet('xf_ptab')||'all',calM=today().slice(0,7),calD=today();
+const addD=(s,n)=>{const d=new Date(s+'T12:00:00');d.setDate(d.getDate()+n);return iso(d)};
+function payEvents(){
+  const ev=[];
+  if(S.inst)for(const c of db.contracts){const k=calc(c);if(k.status==='done')continue;const cl=client(c.clientId);
+    for(const r of k.rows)if(r.st!=='paid')ev.push({date:r.date,amount:r.rest,who:fio(cl),ini:ini(cl),what:`${c.item} · №${c.no} · платёж ${r.n} из ${k.rows.length}`,href:'#/contract/'+c.id,kind:'inst',over:r.st==='overdue',btn:`data-a="pay" data-id="${c.id}" data-v="${r.rest}"`})}
+  if(S.debt)for(const d of db.debts){if(!d.due)continue;const k=dcalc(d);if(k.left<=0)continue;
+    ev.push({date:d.due,amount:k.left,who:fio(d),ini:ini(d),what:d.type==='in'?'Срок возврата долга':'Мне вернуть долг',href:'#/debt/'+d.id,kind:d.type==='in'?'din':'dout',over:d.due<today(),btn:`data-a="op" data-k="pay" data-id="${d.id}"`})}
+  return ev.sort((a,b)=>a.date<b.date?-1:a.date>b.date?1:b.amount-a.amount);
+}
+const PT=[['all','Все должники'],['today','Сегодня'],['tomorrow','Завтра'],['week','Неделя'],['month','Месяц'],['cal','Календарь']];
+function payRange(){const t=today();
+  if(ptab==='today')return[t,t,'на сегодня'];if(ptab==='tomorrow'){const z=addD(t,1);return[z,z,'на завтра']}
+  if(ptab==='week')return[t,addD(t,6),'на 7 дней'];if(ptab==='month'){const[y,m]=t.split('-').map(Number);return[t,iso(new Date(y,m,0)),'до конца месяца']}
+  return[calD,calD,dlong(calD)]}
+const relDay=s=>{const t=today();return s===t?'Сегодня':s===addD(t,1)?'Завтра':s===addD(t,-1)?'Вчера':fdate(s)};
+function payRow(e){const inn=e.kind!=='dout';
+  return`<div class="prw${e.over?' over':''}"><a class="pav ${e.kind}" href="${e.href}">${esc(e.ini)}</a><a class="g" href="${e.href}"><b>${esc(e.who)}</b><small>${esc(e.what)}</small><small class="pd">${e.over?`Просрочен с ${fdate(e.date)}`:relDay(e.date)}</small></a>
+    <div class="pam"><b class="num ${inn?'':'out'}">${inn?'':'−'}${money(e.amount)}</b>${inn?`<button class="btn sm take" ${e.btn}>${I.check}Принять</button>`:`<button class="btn sm" ${e.btn}>Отдать</button>`}</div></div>`}
+function payGroups(list){let last='',h='';for(const e of list){if(e.date!==last){last=e.date;h+=`<div class="pgd">${relDay(e.date)}${e.date===today()||e.date===addD(today(),1)?' · '+fdate(e.date):''}</div>`}h+=payRow(e)}return h}
+function calGrid(ev){
+  const[y,m]=calM.split('-').map(Number),first=new Date(y,m-1,1),start=(first.getDay()+6)%7,dim=new Date(y,m,0).getDate(),t=today(),by={};
+  for(const e of ev)if(e.date.startsWith(calM)){const x=by[e.date]=by[e.date]||{n:0,s:0,o:0,over:0};x.n++;if(e.kind==='dout')x.o+=e.amount;else x.s+=e.amount;if(e.over)x.over=1}
+  const cm=v=>v>=1e6?(v/1e6).toLocaleString('ru-RU',{maximumFractionDigits:2})+' млн':Math.round(v).toLocaleString('ru-RU'),mt=sumBy(Object.values(by),x=>x.s),mo=sumBy(Object.values(by),x=>x.o);
+  let cells='';for(let i=0;i<start;i++)cells+='<span></span>';
+  for(let dd=1;dd<=dim;dd++){const ds=`${calM}-${String(dd).padStart(2,'0')}`,x=by[ds];
+    cells+=`<button class="cd${ds===t?' td':''}${ds===calD?' on':''}${x?' has':''}${x&&x.over?' odue':''}${x&&!x.s?' onlyout':''}" data-a="calDay" data-d="${ds}"${x?` aria-label="${dd}: ${x.s?money(x.s):'−'+money(x.o)}"`:''}><span>${dd}</span>${x?`<em>${x.s?cm(x.s):'−'+cm(x.o)}</em>`:''}</button>`}
+  return`<div class="card cal"><div class="calh"><button class="x" data-a="calMon" data-v="-1" aria-label="Предыдущий месяц">${I.back}</button><b>${MONF[m-1]} ${y}</b><button class="x nx" data-a="calMon" data-v="1" aria-label="Следующий месяц">${I.back}</button></div>
+    <div class="calw">${['Пн','Вт','Ср','Чт','Пт','Сб','Вс'].map(w=>`<span>${w}</span>`).join('')}</div><div class="calg">${cells}</div>
+    <div class="calt"><span>Ожидается за месяц</span><b class="num">${money(mt)}</b></div>${mo?`<div class="calt out"><span>Мне отдать за месяц</span><b class="num">${money(mo)}</b></div>`:''}
+    <div class="calf"><span><i class="dt ok"></i>платежи</span><span><i class="dt od"></i>просрочка</span><button class="btn sm soft" data-a="calToday">Сегодня</button></div></div>`}
+function debtors(){
+  const m=new Map(),get=(id,o)=>{if(!m.has(id))m.set(id,{id,who:fio(o),ini:ini(o),phone:o.phone||'',href:'#/client/'+id,left:0,over:0,days:0,inst:0,debts:0,next:null,out:0});return m.get(id)};
+  if(S.inst)for(const c of db.contracts){const k=calc(c);if(k.left<=0)continue;const cl=db.clients.find(x=>x.id===c.clientId)||{last:'Без клиента'},x=get(c.clientId||'c'+c.id,cl);
+    x.inst++;x.left+=k.left;x.over+=k.overdue;x.days=Math.max(x.days,k.days||0);if(k.next&&(!x.next||k.next.date<x.next.date))x.next={date:k.next.date,amount:k.next.rest}}
+  if(S.debt)for(const d of db.debts){const k=dcalc(d);if(k.left<=0)continue;const cl=db.clients.find(x=>x.id===d.contactId)||d,x=get(d.contactId||'d'+d.id,cl);
+    if(!d.contactId)x.href='#/debt/'+d.id;
+    if(d.type==='out'){x.out+=k.left;continue}x.debts++;x.left+=k.left;if(k.status==='overdue'){x.over+=k.left;x.days=Math.max(x.days,d.due?days(d.due,today()):0)}
+    if(d.due&&(!x.next||d.due<x.next.date))x.next={date:d.due,amount:k.left}}
+  return[...m.values()];
+}
+function debtorRow(x,out){const n=[x.inst?plural(x.inst,['рассрочка','рассрочки','рассрочек']):'',x.debts?plural(x.debts,['долг','долга','долгов']):''].filter(Boolean).join(' · ');
+  return`<a class="prw drw${x.over&&!out?' over':''}" href="${x.href}"><span class="pav ${out?'dout':x.over?'':'inst'}">${esc(x.ini)}</span><span class="g"><b>${esc(x.who)}</b><small>${out?'Я должен':n}${x.phone?' · '+esc(x.phone):''}</small>
+    <small class="pd">${out?'':x.over?`Просрочено ${money(x.over)}${x.days?' · '+pdays(x.days):''}`:x.next?`Следующий платёж ${relDay(x.next.date).toLowerCase()} · ${money(x.next.amount)}`:'Без срока'}</small></span>
+    <span class="pam"><b class="num ${out?'out':''}">${out?'−'+money(x.out):money(x.left)}</b><span class="dgo">${I.back}</span></span></a>`}
+function debtorsView(){
+  const all=debtors(),list=all.filter(x=>x.left>0).sort((a,b)=>(b.over>0)-(a.over>0)||b.days-a.days||(((a.next&&a.next.date)||'9')<((b.next&&b.next.date)||'9')?-1:((a.next&&a.next.date)||'9')>((b.next&&b.next.date)||'9')?1:b.left-a.left)),mine=all.filter(x=>x.out>0);
+  const tot=sumBy(list,x=>x.left),ov=list.filter(x=>x.over>0);
+  const sum=`<div class="card ptot"><div><small>Вам должны</small><div class="v">${N(tot,'ps-all',1)}</div><span>${list.length?plural(list.length,['должник','должника','должников']):'Должников нет'}${mine.length?` · я должен ${money(sumBy(mine,x=>x.out))}`:''}</span></div>${ov.length?`<div class="pso"><small>Просрочено</small><b class="num">${money(sumBy(ov,x=>x.over))}</b><span>${plural(ov.length,['человек','человека','человек'])}</span></div>`:''}</div>`;
+  const body=list.length?`<div class="card plist">${list.map(x=>debtorRow(x)).join('')}</div>`:`<div class="card">${empty(I.users,'Должников нет','Здесь будут все, у кого есть рассрочка или долг: сколько должен, просрочка и ближайший платёж.')}</div>`;
+  return sum+`<div class="pcols"><div>${body}</div>${mine.length?`<div><h2>Я должен</h2><div class="card plist">${mine.map(x=>debtorRow(x,1)).join('')}</div></div>`:''}</div>`;
+}
+function paysView(){
+  const ev=payEvents(),t=today(),[a,b,label]=payRange();
+  const over=ev.filter(e=>e.over),list=ev.filter(e=>e.date>=a&&e.date<=b&&(ptab==='cal'||!e.over)),inc=sumBy(list.filter(e=>e.kind!=='dout'),e=>e.amount),out=sumBy(list.filter(e=>e.kind==='dout'),e=>e.amount);
+  const chips=`<div class="pchips">${PT.map(([k,l])=>{if(k==='all'){const n=debtors().filter(x=>x.left>0).length;return`<button class="pch${ptab===k?' on':''}" data-a="ptab" data-t="all">${I.users}${l}${n?`<em>${n}</em>`:''}</button>`}const[x,y]=k==='cal'?[0,0]:(()=>{const o=ptab;ptab=k;const r=payRange();ptab=o;return r})();const n=k==='cal'?0:ev.filter(e=>!e.over&&e.date>=x&&e.date<=y).length;
+    return`<button class="pch${ptab===k?' on':''}" data-a="ptab" data-t="${k}">${k==='cal'?I.cal:''}${l}${n?`<em>${n}</em>`:''}</button>`}).join('')}</div>`;
+  const sum=`<div class="card ptot"><div><small>Ожидается ${esc(label)}</small><div class="v">${N(inc,'ps-'+ptab+(ptab==='cal'?calD:''),1)}</div><span>${list.length?plural(list.length,['платёж','платежа','платежей']):'Платежей нет'}${out?` · мне отдать ${money(out)}`:''}</span></div>${over.length?`<div class="pso"><small>Просрочено</small><b class="num">${money(sumBy(over.filter(e=>e.kind!=='dout'),e=>e.amount))}</b><span>${plural(over.length,['платёж','платежа','платежей'])}</span></div>`:''}</div>`;
+  const body=list.length?`<div class="card plist">${payGroups(list)}</div>`:`<div class="card">${empty(I.cal,ptab==='cal'?'В этот день платежей нет':'Платежей нет','Здесь появятся платежи по графикам рассрочки и сроки возврата долгов.')}</div>`;
+  const overB=over.length?`<h2>Просрочено</h2><div class="card plist">${over.map(payRow).join('')}</div>`:'';
+  if(ptab==='all')return`<div class="pays">${chips}${debtorsView()}</div>`;
+  return`<div class="pays">${chips}${ptab==='cal'?`<div class="pcal">${calGrid(ev)}<div>${sum}${body}</div></div>${overB}`:`${sum}<div class="pcols"><div>${body}</div>${over.length?`<div>${overB}</div>`:''}</div>`}</div>`;
+}
 function home(){
   const ks=S.inst?db.contracts.map(c=>({c,k:calc(c)})):[],ds=S.debt?db.debts.map(d=>({d,k:dcalc(d)})):[],t=today(),ym=t.slice(0,7),mon=MONF[new Date().getMonth()];
   const act=ks.filter(x=>x.k.status!=='done');
@@ -302,7 +367,11 @@ function home(){
   const overdue=ks.filter(x=>x.k.status==='overdue').sort((a,b)=>b.k.days-a.k.days),lim=iso(new Date(Date.now()+14*864e5));
   const soon=ks.filter(x=>x.k.status==='active'&&x.k.next.date<=lim).sort((a,b)=>a.k.next.date<b.k.next.date?-1:1),d=new Date();
   const title=S.inst&&S.debt?'Рассрочка и долги':S.inst?'Исламская рассрочка':'Учёт долгов';
-  let h=`<div class="top"><div><h1>${esc(me.company||'X-Finance')}</h1><div class="sub">${title} · ${d.getDate()} ${MON[d.getMonth()]}</div></div></div>${instBanner()}<div class="home"><div>
+  const pc=payEvents().filter(e=>e.date<=t).length;
+  let h=`<div class="top"><div><h1>${esc(me.company||'X-Finance')}</h1><div class="sub">${title} · ${d.getDate()} ${MON[d.getMonth()]}</div></div></div>${instBanner()}
+  <div class="htabs" role="tablist"><i class="hthumb${htab==='pay'?' r':''}"></i><button class="${htab==='dash'?'on':''}" data-a="htab" data-t="dash" role="tab">${I.grid}Дашборд</button><button class="${htab==='pay'?'on':''}" data-a="htab" data-t="pay" role="tab">${I.cal}Платежи${pc?`<em>${pc}</em>`:''}</button></div>`;
+  if(htab==='pay')return h+paysView();
+  h+=`<div class="home"><div>
   ${me.tariff&&me.tariff.status==='expired'?`<a class="card tbanner" href="#/tariff">${I.cal}<div><b>Тариф закончился</b><span>Продлите тариф, чтобы продолжить работу</span></div>${I.back}</a>`:''}
   <div class="kpis" style="margin-top:0">`;
   if(S.inst)h+=kpi(I.cash,'gold','Долг клиентов',recv,'k-recv',{href:'#/contracts',a:'tab',t:'active'})+
@@ -318,9 +387,9 @@ function home(){
     (S.inst?'':kpi(I.alert,'warn'+(dov?' hot':''),'Просрочено',dov,'k-dov')+kpi(I.check,'ok','Возвращено',dgot,'k-dgot',{sub:mon}));
   h+=`</div></div><div>`;
   if(!db.contracts.length&&!db.debts.length)h+=`<div class="card" style="margin-top:10px">${empty(I.doc,'Начнём?','Добавьте первый договор или долг: остатки, графики и просрочки приложение посчитает само.')}</div>`;
-  if(overdue.length||dover.length)h+=`<h2>Просрочки</h2><div class="list">${overdue.slice(0,5).map(x=>cCard(x.c,x.k)).join('')}${dover.slice(0,5).map(x=>dCard(x.d,x.k)).join('')}</div>`;
-  if(S.inst&&db.contracts.length)h+=`<h2>Ближайшие платежи</h2>`+(soon.length?`<div class="card rows">${soon.slice(0,8).map(x=>`<a class="rw" href="#/contract/${x.c.id}"><div class="g"><b>${esc(fio(client(x.c.clientId)))}</b><small>${fdate(x.k.next.date)} · ${esc(x.c.item)}</small></div><div class="am num">${money(x.k.next.rest)}</div></a>`).join('')}</div>`
-    :`<div class="card pad muted small">В ближайшие две недели платежей нет.</div>`);
+  if(overdue.length||dover.length)h+=`<section class="hsec"><h2>Просрочки</h2><div class="list">${overdue.slice(0,5).map(x=>cCard(x.c,x.k)).join('')}${dover.slice(0,5).map(x=>dCard(x.d,x.k)).join('')}</div></section>`;
+  if(S.inst&&db.contracts.length)h+=`<section class="hsec"><h2>Ближайшие платежи <button class="hlink" data-a="htab" data-t="pay">Все платежи${I.back}</button></h2>`+(soon.length?`<div class="card rows">${soon.slice(0,8).map(x=>`<a class="rw" href="#/contract/${x.c.id}"><div class="g"><b>${esc(fio(client(x.c.clientId)))}</b><small>${fdate(x.k.next.date)} · ${esc(x.c.item)}</small></div><div class="am num">${money(x.k.next.rest)}</div></a>`).join('')}</div>`
+    :`<div class="card pad muted small">В ближайшие две недели платежей нет.</div>`)+'</section>';
   return h+'</div></div>';
 }
 const CK={inst:[['all','Все','ok'],['active','Активные','ok'],['overdue','Просроченные','warn'],['moved','Перенесённые','gold'],['done','Завершённые','ink']],
@@ -510,9 +579,9 @@ function pagerInit(){
 function debtsList(){
   const ds=db.debts.map(d=>({d,k:dcalc(d)}));
   const f={in:x=>x.d.type==='in'&&x.k.status!=='done',out:x=>x.d.type==='out'&&x.k.status!=='done',done:x=>x.k.status==='done'};
-  const tabs=[['in','Мне должны'],['out','Я должен'],['done','Закрытые']].map(([k,l])=>`<button class="${dtab===k?'on':''}" data-a="dtab" data-t="${k}">${l}<em>${ds.filter(f[k]).length}</em></button>`).join('');
+  const tabs=[['in','Мне должны','ok'],['out','Я должен','gold'],['done','Закрытые','ink']].map(([k,l,t])=>`<button class="cat${dtab===k?' on':''}" data-a="dtab" data-t="${k}">${l}<i></i><b class="${t}">${ds.filter(f[k]).length}</b></button>`).join('');
   const list=ds.filter(f[dtab]).sort((a,b)=>(a.d.due||'9')<(b.d.due||'9')?-1:1);
-  return`<div class="seg">${tabs}</div>
+  return`<div class="dcats"><div class="catr">${tabs}</div></div>
   ${dtab!=='done'&&list.length?`<div class="card hero" style="margin-bottom:10px"><div class="l">${dtab==='in'?'Всего должны мне':'Всего должен я'}</div><div class="v">${N(sumBy(list,x=>x.k.left),'dl-'+dtab,1)}</div></div>`:''}
   ${list.length?`<div class="list grid">${list.map(x=>dCard(x.d,x.k)).join('')}</div>`:`<div class="card">${empty(I.coin,{in:'Вам никто не должен',out:'Вы никому не должны',done:'Закрытых долгов нет'}[dtab])}</div>`}`;
 }
@@ -569,34 +638,55 @@ function investorPage(id){
   ${cs.length?`<div class="list">${cs.sort((a,b)=>b.no-a.no).map(c=>cCard(c)).join('')}</div>`:'<div class="card pad muted small">К инвестору пока не привязан ни один договор.</div>'}
   <div class="row-btns" style="margin-top:22px"><button class="btn" data-a="editInvestor" data-id="${i.id}">Изменить</button><button class="btn danger" data-a="delInvestor" data-id="${i.id}">Удалить</button></div>`;
 }
+/* ---------- Настройки: единый стиль — карточки-группы со строками «значок · текст · управление» ---------- */
+const sRow=(ic,tone,title,sub,right='',attr='')=>`<${attr?'button':'div'} class="srow"${attr?' '+attr:''}><span class="sic ${tone}">${ic}</span><span class="st"><b>${title}</b>${sub?`<small>${sub}</small>`:''}</span>${right}</${attr?'button':'div'}>`;
+const sTog=(on,a,k,lbl)=>`<button class="tog${on?' on':''}" data-a="${a}"${k?` data-k="${k}"`:''} aria-label="${lbl}"></button>`;
+const sGo=v=>`<span class="sgo">${v?`<em>${v}</em>`:''}${I.back}</span>`;
+let VER={app:null,server:null,at:0,busy:false};
+async function loadVer(force){if(VER.busy||(!force&&Date.now()-VER.at<60000))return;VER.busy=true;
+  try{const r=await fetch('version.json?_='+Date.now(),{cache:'no-store'});VER.app=r.ok?(await r.json()).app:null}catch(e){VER.app=null}
+  if(!LOCAL&&!stale)try{const s=await api('GET','/api/server');VER.server=s.version||null;SRV=s}catch(e){}
+  VER.at=Date.now();VER.busy=false;const b=$('#aboutv');if(b)b.innerHTML=aboutRows()}
+const vcmp=(a,b)=>{const x=String(a||'0').split('.').map(Number),y=String(b||'0').split('.').map(Number);for(let i=0;i<Math.max(x.length,y.length);i++){const d=(x[i]||0)-(y[i]||0);if(d)return d}return 0};
+function aboutRows(){
+  const web=location.protocol.startsWith('http'),newer=VER.app&&vcmp(VER.app,APP_VER)>0;
+  const st=!web?['ink','Проверочный файл','обновления приходят в установленное приложение']:VER.at===0?['ink','Проверяю…','']:newer?['gold',`Доступна версия ${VER.app}`,'Нажмите «Обновить», чтобы установить']:VER.app?['ok','Установлена последняя версия','Обновлений нет']:['ink','Не удалось проверить','Нет связи с сервером приложения'];
+  return`<div class="vgrid"><div class="vb"><small>Приложение</small><b>${APP_VER}</b><span>на этом устройстве</span></div>
+    <div class="vb"><small>Последняя версия</small><b class="${newer?'gold':''}">${VER.app||'—'}</b><span>${web?'на сервере приложения':'—'}</span></div>
+    <div class="vb"><small>Серверная часть</small><b>${LOCAL?'нет':VER.server||'—'}</b><span>${LOCAL?'работа без сервера':SRV&&SRV.os?esc(SRV.os):'X-Finance сервер'}</span></div></div>
+  <div class="vst ${st[0]}"><span class="sic ${st[0]==='gold'?'gold':st[0]==='ok'?'ok':'ink'}">${st[0]==='ok'?I.check:st[0]==='gold'?I.upl:I.sync}</span><span class="st"><b>${st[1]}</b>${st[2]?`<small>${st[2]}</small>`:''}</span>
+    ${web?`<button class="btn sm ${newer?'primary':'soft'}" data-a="${newer?'appUpd':'verCheck'}">${newer?I.upl+'Обновить':I.sync+'Проверить'}</button>`:''}</div>`;
+}
 function settings(){
-  const pushOn=lsGet('xf_push_me')==='1';
-  return`<div class="top"><h1>Настройки</h1></div>
+  const pushOn=lsGet('xf_push_me')==='1',g=S.green||{},gOn=!!(g.id&&g.token);loadVer();
+  const prof=LOCAL?sRow(I.cloud,'ink','Без сервера','Данные хранятся на этом устройстве · синхронизация и копия',sGo(),'data-a="goAcc"')
+    :`<button class="sprof" data-a="goAcc"><span class="pava">${esc(ini({last:(me.name||me.login||'?').split(' ')[0],first:(me.name||'').split(' ')[1]||''}))}</span><span class="st"><b>${esc(me.name||me.login)}</b><small>${esc(me.login)}${me.phone?' · '+esc(me.phone):''}${me.company?' · '+esc(me.company):''}</small></span>${sGo()}</button>
+    <div class="sauth"><button class="btn sm soft" data-a="authSwitch" data-m="login">${I.users}Войти в другой</button><button class="btn sm soft" data-a="authSwitch" data-m="reg">${I.plus}Регистрация</button></div>`;
+  return`<div class="top"><div><h1>Настройки</h1><div class="sub">${LOCAL?'Работа без сервера':esc(me.company||me.name||'')}</div></div></div>
   ${mem?'<div class="card pad small" style="color:var(--warn);margin-bottom:12px">Браузер не разрешает сохранять данные в этом режиме. Установите приложение на сервер, чтобы записи не пропадали.</div>':''}
-  ${LOCAL?`<div class="card pad note">Сейчас приложение работает без сервера: данные хранятся только на этом устройстве. Регистрация, ссылки для должников, уведомления, фото документов и кабинет инвестора включаются после установки на сервер.</div>`
-  :''}
-  <h2 style="margin-top:0">Вход и регистрация</h2>
-  ${LOCAL?'':`<div class="aut" style="margin-bottom:10px"><button class="card autb" data-a="authSwitch" data-m="login"><span class="ci">${I.users}</span><b>Вход</b><small>Войти в другой аккаунт</small></button>
-    <button class="card autb" data-a="authSwitch" data-m="reg"><span class="ci gold">${I.plus}</span><b>Регистрация</b><small>Создать новый аккаунт</small></button></div>`}
-  <a class="card menu" href="#/account" style="border-radius:var(--r)"><span>${LOCAL?'Без сервера':esc(me.name||me.login)}<br><small>${LOCAL?'Синхронизация и резервная копия':esc(me.login)+' · '+esc(me.phone||'телефон не указан')+' · синхронизация, вход и регистрация'}</small></span>${I.back}</a>
-  <h2>Тарифы</h2>
+  ${LOCAL?`<div class="card snote">${I.cloud}<span>Сейчас приложение работает <b>без сервера</b>: данные хранятся только на этом устройстве. Вход, синхронизация, ссылки для должников, уведомления и фото документов включаются после установки на сервер.</span></div>`:''}
+  <h2>Вход и регистрация</h2>
+  <div class="card sgrp">${prof}</div>
+  <h2>Тариф</h2>
   ${tariffCard()}
   <h2>Приложение</h2>
   ${instCard()}<div style="height:10px"></div>${zoomCard()}
   <h2>Разделы</h2>
-  <div class="card rows"><div class="sw"><div>Рассрочка<small>Договоры, клиенты, графики платежей, инвесторы</small></div><button class="tog${S.inst?' on':''}" data-a="mode" data-k="inst" aria-label="Режим рассрочки"></button></div>
-    <div class="sw"><div>Долги<small>Кто должен мне и кому должен я</small></div><button class="tog${S.debt?' on':''}" data-a="mode" data-k="debt" aria-label="Режим долгов"></button></div></div>
-  ${S.inst?`<div class="card rows" style="margin-top:10px"><a class="menu" href="#/investors"><span>Инвесторы<br><small>${db.investors.length?plural(db.investors.length,['инвестор','инвестора','инвесторов']):'Доли прибыли и личные кабинеты'}</small></span>${I.back}</a></div>`:''}
-  <h2>Уведомления</h2>
-  <div class="card rows">${LOCAL?'':`<div class="sw"><div>На этом устройстве<small>Сообщать, когда должник подтвердил долг или оплату</small></div><button class="tog${pushOn?' on':''}" data-a="pushMe" aria-label="Уведомления"></button></div>`}
-    <button class="menu" data-a="signForm"><span>Подпись в сообщениях WhatsApp<br><small>${esc(S.sign||'Не задана')}</small></span>${I.back}</button>
-    ${LOCAL?'':`<button class="menu" data-a="greenForm"><span>Автоотправка в WhatsApp<br><small>${S.green&&S.green.id?'Шлюз подключён':'Шлюз Green-API не подключён'}</small></span>${I.back}</button>`}</div>
+  <div class="card sgrp">${sRow(I.doc,'gold','Рассрочка','Договоры, графики платежей, инвесторы',sTog(S.inst,'mode','inst','Режим рассрочки'))}
+    ${sRow(I.coin,'warn','Долги','Кто должен мне и кому должен я',sTog(S.debt,'mode','debt','Режим долгов'))}
+    ${S.inst?sRow(I.chart,'sky','Инвесторы',db.investors.length?plural(db.investors.length,['инвестор','инвестора','инвесторов']):'Доли прибыли и личные кабинеты',sGo(),'data-a="goInv"'):''}</div>
+  <h2>Уведомления и WhatsApp</h2>
+  <div class="card sgrp">${LOCAL?'':sRow(I.bell,'ok','Уведомления на этом устройстве','Когда должник подтвердил долг или оплату',sTog(pushOn,'pushMe','','Уведомления'))}
+    ${LOCAL?'':sRow(I.wa,'wa','WhatsApp через Green API',gOn?'Сообщения клиентам уходят автоматически':'Подключите свой номер — сообщения будут уходить сами',`<span class="sgo"><i class="schip ${gOn?'ok':''}">${gOn?'Подключено':'Не подключено'}</i>${I.back}</span>`,'data-a="greenForm"')}
+    ${sRow(I.edit,'ink','Подпись в сообщениях',S.sign?esc(S.sign):'Не задана — добавляется в конце каждого сообщения',sGo(),'data-a="signForm"')}</div>
   ${backupBlock()}
-  <h2>О приложении</h2>
-  <div class="card rows"><a class="menu" href="#/policy">Политика обработки персональных данных${I.back}</a>
-    <div class="pad note">X-Finance 2.2. Рассрочка по правилам мурабаха: цена фиксируется при заключении договора, за просрочку нет ни пени, ни штрафов.</div></div>
   ${serverBlock()}
-  <div style="margin-top:22px"><button class="btn danger block" data-a="${LOCAL?'wipe':'delAccount'}">${LOCAL?'Удалить все данные':'Удалить аккаунт и все данные'}</button></div>`;
+  <h2>О приложении</h2>
+  <div class="card sabout"><div class="sbrand"><img src="icon-192.png" alt=""><div><b>X-Finance</b><small>Исламская рассрочка и учёт долгов · XStore 95</small></div></div>
+    <div id="aboutv">${aboutRows()}</div>
+    <p class="note" style="margin:12px 2px 0">Рассрочка по правилам мурабаха: цена фиксируется при заключении договора, за просрочку нет ни пени, ни штрафов.</p>
+    <a class="srow slink" href="#/policy"><span class="sic ink">${I.file}</span><span class="st"><b>Политика обработки персональных данных</b></span>${sGo()}</a>
+    <a class="srow slink" href="#/terms"><span class="sic ink">${I.doc}</span><span class="st"><b>Пользовательское соглашение</b></span>${sGo()}</a></div>`;
 }
 /* ---------- уведомления и связи ---------- */
 let lastNote=0;
@@ -699,7 +789,8 @@ function accountPage(){
   :`<div class="aut">
     <button class="card autb" data-a="authSwitch" data-m="login"><span class="ci">${I.users}</span><b>Вход</b><small>Войти в другой аккаунт по логину и паролю</small></button>
     <button class="card autb" data-a="authSwitch" data-m="reg"><span class="ci gold">${I.plus}</span><b>Регистрация</b><small>Создать новый аккаунт X-Finance</small></button></div>
-  <div class="card rows" style="margin-top:10px"><button class="menu" data-a="password">Сменить пароль${I.back}</button><button class="menu" data-a="logout" style="color:var(--warn)">Выйти из аккаунта</button></div>`}`;
+  <div class="card rows" style="margin-top:10px"><button class="menu" data-a="password">Сменить пароль${I.back}</button><button class="menu" data-a="logout" style="color:var(--warn)">Выйти из аккаунта</button></div>`}
+  <div style="margin-top:22px"><button class="btn danger block" data-a="${LOCAL?'wipe':'delAccount'}">${LOCAL?'Удалить все данные с устройства':'Удалить аккаунт и все данные'}</button></div>`;
 }
 
 /* ---------- X-контакты и личные сообщения ---------- */
@@ -835,10 +926,18 @@ function npToggle(open,silent){
 }
 /* ---------- установка и размер интерфейса ---------- */
 const XS=window.XS||{state:()=>['info','',''],f:1,setZoom(){},install:async()=>false};
+const APP_VER='2.4';   // меняй вместе с CACHE в sw.js
+async function appUpdate(){
+  if(!navigator.onLine)return toast('Нет интернета — обновить сейчас нельзя');
+  try{const r=await fetch('index.html?_='+Date.now(),{cache:'no-store'});if(!r.ok)throw 0}catch(e){return toast('Сервер с приложением недоступен — попробуйте позже')}
+  toast('Загружаю свежую версию…');
+  try{const reg=navigator.serviceWorker&&await navigator.serviceWorker.getRegistration();if(reg)await reg.update().catch(()=>{});
+    const ks=await caches.keys();await Promise.all(ks.filter(k=>k.startsWith('xfinance')).map(k=>caches.delete(k)))}catch(e){}
+  setTimeout(()=>location.reload(),500)}
 const ZS=[[.9,'Меньше'],[1,'Обычный'],[1.1,'Крупнее'],[1.2,'Крупный']];
 function instCard(){
   const[k,t,x]=XS.state(),ic=k==='ok'?I.check:k==='warn'?I.alert:I.share;
-  return`<div class="card inst ${k}"><span class="ci">${ic}</span><div><b>${t}</b><small>${esc(x)}</small>
+  return`<div class="card inst ${k}"><span class="ci">${ic}</span><div><b>${t}</b><small>${esc(x)}</small>${location.protocol.startsWith('http')?`<div class="iver"><span>Версия ${APP_VER}</span><button class="btn sm soft" data-a="appUpd">${I.sync}Обновить приложение</button></div>`:''}
     ${k==='go'?`<button class="btn primary sm" data-a="install" style="margin-top:10px">${I.plus}Установить</button>`:''}</div></div>`;
 }
 function zoomCard(){
@@ -1067,6 +1166,13 @@ const offlinePage=()=>`<div class="auth">${brand()}<div class="card">${empty(I.g
 
 /* ---------- отрисовка ---------- */
 let lastRoute=null;
+/* длинные страницы: каждый раздел (заголовок + его карточки) — отдельный блок; на широком экране блоки встают в две колонки */
+/* страницы договора/долга/инвестора: слева сводка и данные, справа история и график (на широком экране) */
+function splitPage(m){const kids=[...m.children],i=kids.findIndex(k=>k.tagName==='H2');if(i<0)return;
+  const head=kids.filter((k,j)=>j<i&&(k.classList.contains('back')||k.classList.contains('top'))),L=document.createElement('div'),R=document.createElement('div'),g=document.createElement('div');
+  g.className='split';L.className='spl';R.className='spr';kids.forEach((k,j)=>{if(head.includes(k))return;(j<i?L:R).append(k)});g.append(L,R);m.append(g)}
+function secGroup(m){const kids=[...m.children];if(!kids.some(k=>k.tagName==='H2'))return;const w=document.createElement('div');w.className='secs';let cur=null;
+  for(const k of kids){if(k.tagName==='H2'){cur=document.createElement('section');cur.className='sec';w.append(cur)}if(cur)cur.append(k)}m.append(w)}
 function render(){renderCore();try{backLabels()}catch(e){}}
 function renderCore(){
   DV++;
@@ -1083,15 +1189,17 @@ function renderCore(){
     const pages={'':home,tariff:tariffPage,check:checkPage,chat:()=>chatPage(id),account:accountPage,inbox:()=>inboxPage(id),ops:opsPage,contracts,contract:()=>contract(id),clients,client:()=>clientPage(id),debts,debt:()=>debtPage(id),investors,investor:()=>investorPage(id),settings};
     html=staleBar()+(pages[name]||home)();
   }
-  m.className=(bare||['contract','debt','investor','settings','ops','inbox','account','chat','check','tariff'].includes(name)||(name==='client'&&!id)?'narrow':'')+(route!==lastRoute?' enter':'');lastRoute=route;
+  m.className=(bare||['contract','debt','investor','settings','ops','inbox','account','chat','check','tariff'].includes(name)||(name==='client'&&!id)?'narrow':'')+(!bare&&!name?' homew':'')+(route!==lastRoute?' enter':'');lastRoute=route;
   m.innerHTML=html;$('#app').classList.toggle('bare',bare);nv.hidden=bare;
+  if(!bare&&['settings','account','tariff'].includes(name))secGroup(m);
+  else if(!bare&&id&&['contract','debt','investor'].includes(name))splitPage(m);
   m.querySelectorAll('.list>*,.kpis>*').forEach((e,i,a)=>e.style.setProperty('--i',Math.min([...e.parentNode.children].indexOf(e),12)));
   if(!bare){
     const sec={contract:'contracts',client:'clients',debt:'debts',investor:'investors'}[name]||name||'',over=S.inst?db.contracts.filter(c=>calc(c).status==='overdue').length:0;
     const both=S.inst&&S.debt,items=[['','Главная',I.home,1,''],['contracts','Договоры',I.doc,S.inst,''],['debts','Долги',I.coin,S.debt&&!S.inst,''],['plus'],['debts','Долги',I.coin,both,''],
-      ['clients','Контакты',I.users,1,''],['investors','Инвесторы',I.chart,S.inst,S.debt?'desk':''],['ops','Все операции',I.list,1,'desk'],['settings','Настройки',I.gear,1,'desk']].filter(x=>x[0]==='plus'||x[3]);
+      ['clients','Контакты',I.users,1,''],['investors','Инвесторы',I.chart,S.inst,S.debt?'desk tail':'tail'],['ops','Все операции',I.list,1,'desk tail'],['settings','Настройки',I.gear,1,'desk tail']].filter(x=>x[0]==='plus'||x[3]);
     nv.innerHTML=`<div class="logo"><img src="icon-192.png" alt="" onerror="this.remove()">X-Finance</div>`+items.map(([h,l,i,,cl])=>h==='plus'
-      ?`<button class="pl${plusOpen?' open':''}" data-a="plus" aria-label="Добавить" aria-expanded="${plusOpen}"><span>${I.plus}</span><b>Добавить</b></button>`
+      ?`<button class="pl${plusOpen?' open':''}" data-a="plus" aria-label="Действие" aria-expanded="${plusOpen}"><span>${I.plus}</span><b>Действие</b></button>`
       :`<a href="#/${h}" class="${cl}${sec===h||(h==='settings'&&sec==='investors')||false?' on':''}">${i}<span>${l}${h==='contracts'&&over?`<i>${over}</i>`:''}</span></a>`).join('');
   }
   $('#app').classList.toggle('full',!bare&&(name==='client'||name==='chat')&&!!id);if(name!=='chat')chatUid=null;if(name==='client'&&id)pagerInit();
@@ -1136,6 +1244,8 @@ function plusMenu(open,silent){
   if(old)old.remove();
   const w=document.createElement('div');w.id='pm';w.className='pm';w.dataset.a='plusOut';
   w.innerHTML=`<div class="pmc" id="pmc">${plusMain()}</div>`;document.body.append(w);
+  if(matchMedia('(min-width:960px)').matches){const b=$('#nav .pl'),c=$('#pmc');if(b&&c){const z=+(getComputedStyle(document.documentElement).getPropertyValue('--z')||1)||1,
+    r=b.getBoundingClientRect(),vh=innerHeight/z,ch=c.offsetHeight;c.style.setProperty('--pmt',Math.max(14,Math.min(r.top/z-12,vh-ch-14))+'px')}}
 }
 const pmItem=(a,icon,tone,t,sub,extra='')=>`<button class="pmi ${tone}" data-a="${a}"${extra}><span class="ic">${icon}</span><span class="tx"><b>${t}</b><small>${sub}</small></span><span class="go">${I.back}</span></button>`;
 function plusMain(){
@@ -1508,6 +1618,12 @@ const A={
   pingNow:async(d,el)=>{const s=el.querySelector('svg');if(s)s.style.animation='rspin .8s linear infinite';await pingNow();if(s)s.style.animation='';loadServer(true)},
   pingTog:(d,el)=>{PG.on=!PG.on;try{localStorage.setItem('xf_ping',PG.on?'1':'0')}catch(e){}el.classList.toggle('on',PG.on);if(PG.on)pingNow();bell();toast(PG.on?'Пинг показывается в кнопке «Обновить»':'Пинг скрыт')},
   copyCmd:async d=>{try{await navigator.clipboard.writeText(d.v)}catch(e){const a=document.createElement('textarea');a.value=d.v;document.body.append(a);a.select();document.execCommand('copy');a.remove()}toast('Команда скопирована')},
+  htab:(d,el)=>{if(htab===d.t)return;htab=d.t;try{localStorage.setItem('xf_htab',htab)}catch(e){}const th=$('.hthumb');if(th)th.classList.toggle('r',htab==='pay');setTimeout(render,180)},
+  ptab:d=>{ptab=d.t;try{localStorage.setItem('xf_ptab',ptab)}catch(e){}if(ptab==='cal'){calM=calD.slice(0,7)}render()},
+  calDay:d=>{calD=d.d;render()},
+  calMon:d=>{const[y,m]=calM.split('-').map(Number),n=new Date(y,m-1+(+d.v),1);calM=iso(n).slice(0,7);render()},
+  calToday:()=>{calD=today();calM=calD.slice(0,7);render()},
+  appUpd:()=>appUpdate(),
   bellOpen:()=>npToggle(!npOpen),npClose:()=>npToggle(false),npOut:(d,el,ev)=>{if(ev.target===el)npToggle(false)},
   ntab:d=>{ntab=d.t;npRender()},
   noteGo:async d=>{const x=(NI.notes||[]).find(y=>y.id==d.id);if(x&&!x.read){x.read=1;NI.unread=Math.max(0,NI.unread-1);api('POST',`/api/notes/${x.id}/read`).catch(()=>{})}npToggle(false);nav(d.u.replace(/^\/?#/,'#'))},
@@ -1546,9 +1662,21 @@ const A={
   confirmOp:async(d,el)=>{const l=el.closest('[data-link]');if(l){await api('POST',`/api/links/${l.dataset.link}/confirm`,{opId:d.id,debtId:d.d});shared=null;await loadShared();toast('Подтверждено');return}
     pubData=await api('POST',`/api/public/${pub}/confirm`,{opId:d.id,debtId:d.d});render();toast('Подтверждено')},
   signForm:()=>sheet('Подпись в сообщениях',fld('Подпись в конце сообщений WhatsApp','sign',S.sign,'placeholder="Например: Идрис, X-Finance"'),async f=>{await saveS({sign:f.sign.trim()});render()}),
-  greenForm:()=>{const g=S.green||{};sheet('Автоотправка в WhatsApp',`<div class="note" style="margin-bottom:12px">Чтобы сообщения уходили клиентам сами, подключите свой номер в сервисе Green-API и вставьте данные из его личного кабинета. Без шлюза приложение открывает WhatsApp с готовым текстом, остаётся нажать «Отправить».</div>
-    ${fld('Адрес API (apiUrl)','url',g.url||'https://api.green-api.com','autocapitalize="none"')}${fld('idInstance','id',g.id||'','inputmode="numeric"')}${fld('apiTokenInstance','token',g.token||'','autocapitalize="none"')}`,
-    async f=>{await saveS({green:{url:f.url.trim(),id:f.id.trim(),token:f.token.trim()}});render();toast(f.id.trim()?'Шлюз сохранён':'Шлюз отключён')})},
+  greenForm:()=>{const g=S.green||{},on=!!(g.id&&g.token);
+    sheet('WhatsApp через Green API',`<div class="gwh"><span class="gwi">${I.wa}</span><div><b>${on?'Шлюз подключён':'Автоотправка сообщений'}</b><small>${on?'Сообщения о платежах и напоминания уходят клиентам сами с вашего номера.':'Сообщения о платежах и напоминания будут уходить клиентам сами — с вашего номера WhatsApp.'}</small></div></div>
+    <ol class="gsteps"><li><b>Зарегистрируйтесь</b> на <a href="https://green-api.com" target="_blank" rel="noopener">green-api.com</a> и создайте инстанс.</li><li><b>Подключите номер:</b> в кабинете Green-API отсканируйте QR-код в WhatsApp (Связанные устройства).</li><li><b>Скопируйте</b> apiUrl, idInstance и apiTokenInstance сюда.</li></ol>
+    ${fld('Адрес API (apiUrl)','url',g.url||'https://api.green-api.com','autocapitalize="none" spellcheck="false"')}
+    <div class="g2">${fld('idInstance','id',g.id||'','inputmode="numeric" spellcheck="false" placeholder="1101000000"')}${fld('apiTokenInstance','token',g.token||'','autocapitalize="none" spellcheck="false" placeholder="токен из кабинета"')}</div>
+    <div class="gstate" id="gst">${on?'Нажмите «Проверить», чтобы узнать состояние номера':'После ввода данных нажмите «Проверить»'}</div>
+    <div class="row-btns" style="margin-bottom:12px"><button type="button" class="btn soft" data-a="greenCheck">${I.sync}Проверить</button>${on?`<button type="button" class="btn danger" data-a="greenOff">Отключить</button>`:''}</div>`,
+    async f=>{await saveS({green:{url:(f.url||'').trim(),id:(f.id||'').trim(),token:(f.token||'').trim()}});render();toast((f.id||'').trim()?'Шлюз сохранён':'Шлюз отключён')},'Сохранить')},
+  greenCheck:async(d,el)=>{const f=formData(),st=$('#gst');if(!(f.id||'').trim()||!(f.token||'').trim()){st.className='gstate warn';st.textContent='Укажите idInstance и apiTokenInstance';return}
+    st.className='gstate';st.textContent='Проверяю…';const s=el.querySelector('svg');if(s)s.style.animation='rspin .8s linear infinite';
+    try{const r=await api('POST','/api/green/check',{url:f.url,id:f.id,token:f.token});st.className='gstate '+(r.ok?'ok':'warn');st.textContent=r.text}catch(e){st.className='gstate warn';st.textContent=e.message}
+    if(s)s.style.animation=''},
+  greenOff:()=>confirmBox('Отключить WhatsApp?','Сообщения перестанут уходить автоматически. Отправлять вручную через WhatsApp можно будет как раньше.','Отключить',async()=>{await saveS({green:{url:'',id:'',token:''}});render();toast('Шлюз отключён')}),
+  goAcc:()=>nav('#/account'),goInv:()=>nav('#/investors'),
+  verCheck:async(d,el)=>{const s=el.querySelector('svg');if(s)s.style.animation='rspin .8s linear infinite';await loadVer(true);toast(VER.app&&vcmp(VER.app,APP_VER)>0?'Доступна новая версия '+VER.app:VER.app?'У вас последняя версия':'Не удалось проверить')},
   account:()=>sheet('Аккаунт',fld('Фамилия, имя, отчество','name',me.name)+fld('Название компании','company',me.company)+fld('Номер телефона','phone',me.phone,'inputmode="tel"')+`<div class="note" style="margin:-4px 2px 12px">Название компании и телефон видят ваши клиенты и должники на своих страницах.</div>`,
     async f=>{const r=await api('POST','/api/account',{name:f.name,company:f.company,phone:f.phone});me=r.user;render();toast('Сохранено')}),
   password:()=>sheet('Сменить пароль',fld('Старый пароль','old','','type="password" autocomplete="current-password"')+fld('Новый пароль (не короче 8 символов)','password','','type="password" autocomplete="new-password"'),
@@ -1737,17 +1865,18 @@ async function runAuto(force){
 function backupBlock(){
   const a=AB.get(),last=a.last?new Date(a.last):null,lastTxt=last?`${dmy(iso(last))} в ${pad(last.getHours())}:${pad(last.getMinutes())}`:'ещё не было';
   return`<h2>Резервная копия</h2>
-  <div class="card rows">
-    <div class="sw"><div>Автоматическая копия<small>JSON и Excel в ваши файлы</small></div><button class="tog${a.on?' on':''}" data-a="abToggle" aria-label="Автоматическая копия"></button></div>
-    ${canDir?`<button class="menu" data-a="abDir"><span>Папка для копий<br><small>${dirH?esc(dirH.name)+(dirOk?'':' · нужно разрешение'):'Не выбрана: копии будут в «Загрузках»'}</small></span>${I.back}</button>`:''}
+  <div class="card sgrp">
+    ${sRow(I.shield||I.check,'ok','Автоматическая копия','JSON и Excel в ваши файлы',sTog(a.on,'abToggle','','Автоматическая копия'))}
+    ${canDir?sRow(I.box,'gold','Папка для копий',dirH?esc(dirH.name)+(dirOk?'':' · нужно разрешение'):'Не выбрана: копии будут в «Загрузках»',sGo(),'data-a="abDir"'):''}
     ${a.on&&canDir&&dirH?`<div class="sw"><div>Как часто<small>${a.freq==='change'?'После каждого изменения, файл дня обновляется':'Один раз в день'}</small></div>
       <div class="tg" style="height:38px"><button class="${a.freq==='change'?'on':''}" data-a="abFreq" data-v="change" style="width:auto;padding:0 10px;font-size:13px">Всегда</button><button class="${a.freq!=='change'?'on':''}" data-a="abFreq" data-v="day" style="width:auto;padding:0 10px;font-size:13px">Раз в день</button></div></div>`:''}
     <div class="pad note" style="padding-top:12px">${a.on?(canDir&&dirH?`Каждый раз сохраняются два файла в папку «${esc(dirH.name)}»: <b>.json</b> для восстановления и <b>.xlsx</b> для Excel.`
       :`Раз в день, при первом изменении, в «Загрузки» (в «Моих файлах») скачиваются два файла: <b>.json</b> для восстановления и <b>.xlsx</b> для Excel. Браузер может один раз спросить разрешение на скачивание нескольких файлов.`):'Включите, чтобы копии сохранялись сами.'}
       ${LOCAL?'':' Фото документов хранятся на сервере и в копию не входят.'}<br>Последняя автокопия: ${lastTxt}.${a.err?`<br><span style="color:var(--warn)">${esc(a.err)}</span>`:''}</div>
   </div>
-  <div class="row-btns" style="margin-top:10px"><button class="btn primary" data-a="bkJson">${I.file}Копия JSON</button><button class="btn soft" data-a="bkXlsx">${I.list}Excel</button></div>
-  <button class="btn block" style="margin-top:10px" data-a="restore">Восстановить из копии .json</button>`;
+  <div class="bkacts"><button class="card bka" data-a="bkJson"><span class="sic ok">${I.file}</span><b>Копия JSON</b><small>для восстановления</small></button>
+    <button class="card bka" data-a="bkXlsx"><span class="sic sky">${I.list}</span><b>Excel</b><small>таблица .xlsx</small></button>
+    <button class="card bka" data-a="restore"><span class="sic gold">${I.undo}</span><b>Восстановить</b><small>из копии .json</small></button></div>`;
 }
 Object.assign(A,{
   abToggle:async()=>{const on=!AB.get().on;AB.set({on,freq:AB.get().freq||'change'});render();if(on){toast('Автоматическая копия включена');await runAuto(true)}},
