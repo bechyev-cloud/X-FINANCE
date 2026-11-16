@@ -1,5 +1,5 @@
 /* X-Finance: работа без сети и push-уведомления */
-const CACHE='xfinance-v42';
+const CACHE='xfinance-v49';
 // пути относительные: приложение работает и в корне сайта, и в папке (например, GitHub Pages)
 const FILES=['./','index.html','shell.js','app.js','manifest.json','icon-192.png','icon-512.png','apple-touch-icon.png','favicon-32.png'];
 const HOME=new URL('index.html',self.registration.scope).href;
